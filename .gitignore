@@ -1,0 +1,10 @@
+node_modules
+dist
+release-app
+data
+*.log
+*.dmg
+*.exe
+*.app
+*.zip
+.DS_Store

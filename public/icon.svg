@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" fill="none">
+  <defs>
+    <linearGradient id="favicon-bg" x1="16" y1="2" x2="16" y2="30" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#e2e8f0"/>
+      <stop offset="0.5" stop-color="#94a3b8"/>
+      <stop offset="1" stop-color="#475569"/>
+    </linearGradient>
+    <linearGradient id="favicon-face" x1="16" y1="4" x2="16" y2="24" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#f1f5f9" stop-opacity="0.9"/>
+      <stop offset="0.6" stop-color="#cbd5e1" stop-opacity="0.6"/>
+      <stop offset="1" stop-color="#64748b" stop-opacity="0.4"/>
+    </linearGradient>
+  </defs>
+  <path d="M16 4 L24 12 L22 22 L16 28 L10 22 L8 12 Z" fill="url(#favicon-bg)" stroke="#64748b" stroke-width="1.2" stroke-linejoin="round"/>
+  <path d="M16 8 L20 12 L20 20 L16 24 L12 20 L12 12 Z" fill="url(#favicon-face)" stroke="#94a3b8" stroke-width="0.8" stroke-linejoin="round" opacity="0.85"/>
+</svg>

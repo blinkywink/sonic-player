@@ -1,0 +1,162 @@
+================================================================================
+SONIC — FEATURE LIST (specific)
+================================================================================
+
+APPLICATION
+-----------
+- Product name: Sonic (Plex music client + local playlists).
+- Single-window web UI; backend runs as Node/Express server (dev or in-process when packaged).
+- Mac build: Electron app with menu-bar tray; server starts automatically; "Open Sonic" opens app in browser; Run at startup checkbox; single-instance lock (second launch quits immediately).
+- Favicon and sidebar logo use public/icon.png.
+
+
+NAVIGATION & LAYOUT
+-------------------
+- Sidebar: persistent left column with logo, nav (Music, Now Playing, Queue, Playlists, Settings), resize handle when layout unlocked.
+- Main area: content for the selected view; scrollable; padding and gap consistent.
+- Layout lock (Settings > Layout): when locked, sidebar and album panel cannot be resized; when unlocked, drag edges to resize sidebar and (when visible) album-detail panel.
+- Sidebar width persisted in localStorage; minimum width enforced.
+- Clicking the logo/title in sidebar goes to Music view.
+
+
+MUSIC (LIBRARY) VIEW
+-------------------
+- Shows Plex music library albums only (artist-type or music-type section).
+- Requires Plex sign-in; placeholder shown until signed in.
+- Search: text field filters albums and tracks by title, artist, year; search is client-side over loaded albums and preloaded track titles.
+- Sort: Title A–Z / Z–A, Artist A–Z / Z–A, Year newest / oldest.
+- Group by: None, Artist, Year (with section headers).
+- View mode: Grid (album art cards) or List (rows with art + title/artist/year).
+- Album grid/list: each album shows thumb, title, artist, optional year; click selects album and shows track list in right panel; double-click plays album from track 1.
+- Track list (when album selected): track index, title, duration; click plays that track (and rest of album in queue); double-click plays album; right-click context menu.
+- Hover on album: prefetches that album’s tracks after short delay for faster selection.
+- Preloaded tracks cached in memory so switching back to an album is instant.
+- Album panel (right): shows selected album art and track list; can be resized when layout unlocked.
+- Empty state when no music library on server; error state with backend-not-running hint when fetch fails.
+
+
+CONTEXT MENUS (RIGHT-CLICK)
+---------------------------
+- Album context menu: Add to queue, Shuffle play (album), Add to playlist (opens add-to-playlist flow).
+- Track context menu: Add to queue, Shuffle play (from this track), Add to playlist.
+- Context menu closes on outside click or after choosing an action.
+
+
+PLAYBACK
+--------
+- Play/pause, previous, next, shuffle, repeat (off / all / one).
+- Seek bar: click/drag to seek; shows current time and duration (M:SS); thumb appears on hover.
+- Volume: slider 0–100%; mute button toggles volume to 0 or restores previous.
+- Player state (volume, repeat, shuffle) persisted to localStorage and restored on load.
+- Shuffle: toggles shuffle; when enabled, queue order is randomized (original order kept for “shuffle off”).
+- Repeat: off → all → one (cycle); repeat one replays current track.
+- Previous: if past ~50% of track, restarts current track; else goes to previous track (or restarts track 0).
+- Next: advances to next track; at end of queue stops (or wraps if repeat all).
+- Playback uses HTML5 Audio; stream URL from backend (Plex stream or direct URL).
+- Local Plex: stream URL fetched from backend (stream-url API) with 8s timeout fallback; remote Plex: direct stream URL.
+- Preload: next track in queue preloaded after short delay to reduce gap between tracks.
+- Loading and playback error states shown in player bar (e.g. “Loading…”, “Network error”).
+- Session history: “back” within session (e.g. from Now Playing) uses in-session play history; previous track button can step back in history when applicable.
+
+
+NOW PLAYING VIEW
+----------------
+- Full “theatre” view: large album art, track title, artist, seek bar, play/pause, previous, next.
+- Same controls as player bar (seek, previous, next, play/pause) with larger layout.
+- Session history integrated: previous can go back to the track you came from in this session.
+
+
+QUEUE VIEW
+----------
+- Lists current playback queue: order, album art, track title, artist, album, duration.
+- Current track indicated (e.g. highlight or icon).
+- Click a row: play from that track (queue stays as-is).
+- Remove single track from queue.
+- Reorder: drag-and-drop or move controls to change queue order.
+- Clear queue button.
+- Empty state when queue is empty; sign-in required message when not signed in to Plex.
+
+
+PLAYLISTS
+---------
+- Playlists are local (stored in data/playlists.json via backend); not Plex playlists.
+- List view: all playlists with name and optional image; create new playlist (name + optional image upload); click playlist opens detail.
+- Playlist detail: name (editable when “Edit playlist” active), optional cover image, list of tracks (title, artist, album, art); play button (plays playlist from start); options menu: Edit playlist, Delete playlist.
+- Add to playlist: from context menu (album or track), modal to pick existing playlist or create new one; supports adding single track or (from album context) multiple.
+- Playlist items store: trackKey, partKey, title, artist, album, thumb (for display and playback).
+- Reorder playlist tracks (API: fromIndex/toIndex or order array).
+- Delete track from playlist (by index).
+- Delete entire playlist with confirmation.
+- New playlist: name required; image optional (file upload); created via POST /api/playlists.
+
+
+SETTINGS
+--------
+- Layout: Lock/Unlock sidebar and panels; short description of resize behavior.
+- Theme: Color picker and hex input for theme seed (#RRGGBB or #RGB); “Use album art color for theme when playing” (theme updates from now-playing album art dominant color); Text mode: Auto (from theme luminance), Light text, Dark text.
+- Parametric EQ: 20 bands (25 Hz–16 kHz, log-spaced); preamp ±12 dB; presets: Flat, Bass boost, Treble boost, Rock, Jazz, Classical, Custom; per-band sliders ±12 dB; curve drawn as SVG; settings persisted to localStorage and applied to playback (Web Audio or similar if implemented).
+- Plex account: Sign in with Plex (PIN flow: create PIN, open Plex auth URL, poll until token, then token synced to backend); status “Connected as &lt;username&gt;” or “Not connected”; sign-out clears token.
+- Font: Dropdown for app font: System default, Inter, SF Pro, Segoe UI, Helvetica Neue, Georgia; persisted to localStorage; applied via CSS variable to body (Inter loaded from Google Fonts).
+- Streaming quality: Separate settings for “On local network” and “On other networks”: 128 / 256 / 320 kbps, Lossless; persisted; backend uses these when transcoding or choosing stream (if implemented).
+- Current connection: Displays “Local network” or “Other network” when backend reports it.
+- Cache: “Reset cache” button; clears API and image caches on server; shows success/failure.
+- Last.fm Scrobbling: API Key and API Secret fields (from last.fm/api); Connect to Last.fm (opens auth popup); “I’ve finished signing in” completes session exchange; Test connection; Disconnect; status shows “Connected as &lt;user&gt;” and “✓ Working” or “✗ Not working”; scrobbling error message shown if now-playing or scrobble fails (e.g. “Scrobbling: &lt;error&gt;”).
+
+
+LAST.FM
+-------
+- Now Playing: sent to Last.fm as soon as the user switches to a track (before stream URL is ready); includes artist, track, album, duration; uses session key and API key/secret from Settings.
+- Scrobble: when changing tracks, previous track is scrobbled if it was played at least 50% or 4 minutes (whichever is shorter); timestamp is when that track started; same credentials as Now Playing.
+- Test connection: POST to backend /api/lastfm/test with session key and API key/secret; backend calls Last.fm updateNowPlaying with test artist/track; success clears any previous scrobbling error.
+- Errors from now-playing or scrobble (e.g. invalid session, network) shown in Settings under Last.fm; cleared on successful test or reconnect.
+
+
+PLEX INTEGRATION
+----------------
+- Auth: Plex PIN flow via plex.tv (create PIN, open auth URL, poll PIN until token); token stored in frontend and sent to backend; backend stores active token for API calls.
+- Server selection: backend resolves Plex server from user’s devices (prefers local connection when marked local).
+- Libraries: GET libraries (music only: type artist or music); returns section key and title.
+- Albums: GET albums for a section (type 9); returns list with key, title, artist, thumb, year; optional serverUri in response.
+- Album tracks: GET album by ratingKey children; returns tracks with key, title, index, duration, bitrate, partKey, container, etc., for streaming.
+- Thumbnails: GET thumb via backend; backend fetches from Plex and caches (in-memory, 24h TTL, max 300); frontend uses thumb URL with token.
+- Stream URL: for “local” connections, backend may return a URL (stream-url endpoint); frontend falls back after timeout.
+- Stream: GET stream with path and token; backend proxies Plex stream (or transcodes if quality setting applied); used for actual playback.
+- Connection: GET connection returns whether current connection is local or not (for quality/streaming logic).
+
+
+BACKEND API (SERVER)
+--------------------
+- Plex: pins (create, poll), token (set), libraries, albums, album/:id/tracks, stream-url, stream, thumb, connection; recentlyAdded and onDeck and recentlyPlayedTracks (session history) available for future use.
+- Last.fm: token (get auth URL), session (exchange token for session key), nowPlaying, scrobble, test.
+- Playlists: GET/POST/PUT/DELETE playlists; POST/DELETE playlist items; PUT reorder.
+- Cache: POST cache/reset.
+- Static: serves dist (e.g. index.html, JS, assets) for SPA; data dir and playlists file path configurable via env.
+
+
+DATA & PERSISTENCE
+------------------
+- Playlists: stored in data/playlists.json (path from DATA_DIR); each playlist has id, name, image (optional), items (array of track references).
+- localStorage (frontend): Plex token, theme seed, theme from album art, theme text mode, sidebar width, layout locked, volume, repeat, shuffle, EQ preset and gains, preamp, streaming quality local/remote, app font, Last.fm API key/secret, session key, username.
+- Player state (volume, repeat, shuffle) read on init from localStorage; no server-side user account beyond Plex token and Last.fm session.
+
+
+UI/UX DETAILS
+-------------
+- CSS variables for theming: --app-bg, --app-surface, --app-border, --app-text, --app-muted, --app-accent, --app-accent-dim; theme seed drives these.
+- Custom scrollbar hiding where needed (e.g. .hide-scrollbar).
+- Player range inputs: thumb hidden by default, visible on hover/focus.
+- EQ sliders: vertical, always visible, accent color.
+- Monospace used for hex input and some technical labels.
+- Accessible: aria-labels on controls, role="button" where appropriate, keyboard (Enter/Space) on clickable rows.
+- Resize handle for sidebar has cursor col-resize and clear hit area.
+
+
+BUILD & PACKAGING
+-----------------
+- Vite + React + TypeScript; Electron for Mac; electron-builder for .app and .dmg.
+- Package scripts: dev, build, server, electron, electron:dev, package, package:mac, package:win.
+- Icon for app from public/icon.png; tray icon from public/tray-icon.png or public/icon.png.
+
+================================================================================
+End of feature list.
+================================================================================

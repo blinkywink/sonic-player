@@ -1,0 +1,16 @@
+---
+description: Restart the backend when server changes require it
+globs: server.js
+alwaysApply: false
+---
+
+# Restart backend after server changes
+
+When you edit `server.js` or any backend code that requires a process restart to take effect:
+
+1. After saving your changes, restart the backend for the user.
+2. Find the process using port 4000: `lsof -ti :4000`
+3. Kill it: `kill $(lsof -ti :4000)` (or the PID from step 2)
+4. Start the server again in the background: `cd "<workspace-root>" && npm run server` with `is_background: true`
+
+Do not ask the user to restart manually; do it as part of the same response.
