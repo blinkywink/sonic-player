@@ -46,3 +46,23 @@ jobs:
           name: sonic-windows
           path: dist/*.exe
 
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install dependencies
+        run: npm ci
+      - name: Build and package Linux app (no publish)
+        run: |
+          npm run build
+          node scripts/prepare-mac-app.cjs
+          npx electron-builder --linux --publish never
+      - name: Upload Linux artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sonic-linux
+          path: dist/*.AppImage
+
