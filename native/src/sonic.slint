@@ -36,6 +36,7 @@ component Action inherits Rectangle {
     height: 38px;
     border-radius: 8px;
     background: active ? Palette.accent : hit.has-hover ? Palette.hover : Palette.surface;
+    animate background { duration: 120ms; easing: ease-out; }
     border-width: 1px;
     border-color: Palette.border;
     Label { text: root.label; horizontal-alignment: center; font-weight: 600; }
@@ -53,6 +54,7 @@ component IconButton inherits Rectangle {
     callback clicked;
     border-radius: compact ? 20px : 10px;
     background: filled ? #ffffff : selected ? Palette.accent : hit.has-hover ? Palette.hover : transparent;
+    animate background { duration: 120ms; easing: ease-out; }
     accessible-role: button;
     accessible-label: label;
     accessible-action-default => { clicked(); }
@@ -173,6 +175,7 @@ component RowInput inherits TouchArea {
     callback activate;
     clicked => { keyboard.focus(); root.activate(); }
     keyboard := FocusScope {
+        focus-on-click: false;
         enabled: root.enabled;
         key-pressed(event) => {
             if root.enabled && (event.text == Key.Return || event.text == " ") {
@@ -432,6 +435,7 @@ export component Sonic inherits Window {
                                     Label { text: track.time; width: 37px; color: Palette.muted; font-size: 12px; }
                                 }
                                 item := RowInput {
+                                    x: 0; y: 0; width: parent.width; height: parent.height;
                                     mouse-cursor: pointer;
                                     activate => { root.select-track(index); }
                                     pointer-event(e) => {
@@ -526,24 +530,35 @@ export component Sonic inherits Window {
                 horizontal-stretch: 1;
                 padding: 20px;
                 spacing: 12px;
-                HorizontalLayout {
-                    height: 38px;
-                    spacing: 8px;
-                    LineEdit {
-                        horizontal-stretch: 1; max-width: 400px;
-                        placeholder-text: "Search songs and albums…";
-                        edited(text) => { root.searching = text != ""; grid.content-y = 0px; root.search(text); }
+                library-controls := Rectangle {
+                    min-width: 0px;
+                    property <bool> stacked: self.width < (root.local-count > 0 ? 660px : 550px);
+                    height: self.stacked ? 84px : 38px;
+                    HorizontalLayout {
+                        x: 0px; y: 0px;
+                        width: library-controls.stacked ? parent.width : parent.width - sort-controls.width - 8px;
+                        height: 38px; spacing: 8px;
+                        LineEdit {
+                            min-width: 0px; horizontal-stretch: 1;
+                            placeholder-text: "Search songs and albums…";
+                            edited(text) => { root.searching = text != ""; grid.content-y = 0px; root.search(text); }
+                        }
+                        if root.local-count > 0: ComboBox { width: 110px; model: ["All music", "Local files"]; selected => { root.filter-local(self.current-index == 1); } }
+                        Action { width: 75px; label: "Refresh"; clicked => { root.refresh-library(); } }
                     }
-                    if root.local-count > 0: ComboBox { width: 110px; model: ["All music", "Local files"]; selected => { root.filter-local(self.current-index == 1); } }
-                    Action { width: 75px; label: "Refresh"; clicked => { root.refresh-library(); } }
-                    ComboBox {
-                        width: 137px;
-                        model: ["Title (A–Z)", "Title (Z–A)", "Artist (A–Z)", "Artist (Z–A)", "Year (newest)", "Year (oldest)"];
-                        selected => { grid.content-y = 0px; root.sort-albums(self.current-index); }
+                    sort-controls := HorizontalLayout {
+                        x: library-controls.stacked ? 0px : parent.width - self.width;
+                        y: library-controls.stacked ? 46px : 0px;
+                        width: 315px; height: 38px; spacing: 8px;
+                        ComboBox {
+                            width: 137px;
+                            model: ["Title (A–Z)", "Title (Z–A)", "Artist (A–Z)", "Artist (Z–A)", "Year (newest)", "Year (oldest)"];
+                            selected => { grid.content-y = 0px; root.sort-albums(self.current-index); }
+                        }
+                        ComboBox { width: 82px; model: ["None", "Artist", "Year"]; selected => { grid.content-y = 0px; root.group-albums(self.current-index); } }
+                        Action { width: 36px; label: "▦"; active: !root.list-mode; clicked => { root.list-mode = false; grid.content-y = 0px; } }
+                        Action { width: 36px; label: "≡"; active: root.list-mode; clicked => { root.list-mode = true; grid.content-y = 0px; } }
                     }
-                    ComboBox { width: 82px; model: ["None", "Artist", "Year"]; selected => { grid.content-y = 0px; root.group-albums(self.current-index); } }
-                    Action { width: 36px; label: "▦"; active: !root.list-mode; clicked => { root.list-mode = false; grid.content-y = 0px; } }
-                    Action { width: 36px; label: "≡"; active: root.list-mode; clicked => { root.list-mode = true; grid.content-y = 0px; } }
                 }
                 if root.albums.length == 0: Label {
                     text: root.local-enabled ? root.local-status : "No albums found.";
@@ -596,42 +611,60 @@ export component Sonic inherits Window {
                         if root.searching: Label { text: "ALBUMS"; font-size: 11px; font-weight: 600; height: 17px; color: Palette.muted; }
                 grid := ListView {
                     horizontal-stretch: 1;
-                    property <int> columns: root.list-mode ? 1 : max(1, floor(self.visible-width / 154px));
-                    property <length> row-height: root.list-mode ? 62px : self.tile-width + 37px;
-                    property <length> tile-width: self.visible-width / self.columns;
+                    min-width: 0px;
+                    property <length> gap: 16px;
+                    property <int> columns: root.list-mode ? 1 : max(1, floor((self.visible-width + self.gap) / (160px + self.gap)));
+                    property <length> cover-size: max(1px, (self.visible-width - (self.columns - 1) * self.gap) / self.columns);
+                    property <length> row-height: root.list-mode ? 62px : self.cover-size + 66px;
                     for row in root.album-rows: Rectangle {
                       height: grid.row-height + (row.heading == "" ? 0px : 27px);
                       if row.heading != "": Label { y: 0px; height: 23px; text: row.heading; font-size: 14px; font-weight: 600; color: Palette.muted; }
                       for column in row.count: Rectangle {
                         property <Album> album: root.albums[row.offset + column];
-                        x: column * grid.tile-width;
+                        x: column * (grid.cover-size + grid.gap);
                         y: row.heading == "" ? 0px : 27px;
-                        width: grid.tile-width - 10px;
-                        height: grid.row-height - (root.list-mode ? 5px : 10px);
+                        width: grid.cover-size;
+                        height: grid.row-height - (root.list-mode ? 5px : grid.gap);
                         border-radius: 10px;
                         background: root.list-mode ? (root.selected-key == album.key ? Palette.selected : tile.has-hover ? Palette.hover : Palette.surface) : transparent;
                         if !root.list-mode: VerticalLayout {
-                            spacing: 3px;
                             Rectangle {
-                                height: grid.tile-width - 10px;
-                                background: root.selected-key == album.key ? Palette.selected : Palette.surface;
-                                border-radius: 12px; border-color: root.selected-key == album.key ? Palette.accent : Palette.border;
-                                border-width: root.selected-key == album.key ? 2px : 1px;
+                                height: grid.cover-size;
+                                background: Palette.surface;
+                                border-radius: 12px;
                                 clip: true;
-                                Image { source: album.art; image-fit: cover; }
+                                Image { x: 0; y: 0; width: parent.width; height: parent.height; source: album.art; image-fit: cover; }
+                                Rectangle {
+                                    x: 0; y: 0; width: parent.width; height: parent.height;
+                                    border-radius: 12px;
+                                    border-color: root.selected-key == album.key ? Palette.accent : tile.has-hover ? Palette.muted : transparent;
+                                    border-width: root.selected-key == album.key ? 3px : 1px;
+                                    animate border-color { duration: 120ms; easing: ease-out; }
+                                }
                             }
-                            Label { text: album.title; font-weight: 600; font-size: 13px; height: 16px; }
-                            Label { text: album.artist; color: Palette.muted; font-size: 12px; height: 15px; }
+                            VerticalLayout {
+                                padding-top: 8px; padding-left: 2px; padding-right: 2px; spacing: 1px;
+                                Label { text: album.title; font-weight: 600; font-size: 13px; height: 16px; }
+                                Label { text: album.artist == "" ? "—" : album.artist; color: Palette.muted; font-size: 12px; height: 14px; }
+                                Label { text: album.year; color: Palette.muted; font-size: 11px; height: 12px; }
+                            }
                         }
                         if root.list-mode: HorizontalLayout {
-                            padding: 6px;
-                            spacing: 11px;
-                            Image { width: 45px; source: album.art; image-fit: cover; }
+                            padding-left: 12px; padding-right: 12px; padding-top: 5px; padding-bottom: 5px;
+                            spacing: 12px;
+                            Rectangle {
+                                width: 47px; border-radius: 8px; clip: true; background: Palette.background;
+                                Image { x: 0; y: 0; width: parent.width; height: parent.height; source: album.art; image-fit: cover; }
+                            }
                             Label { text: album.title; horizontal-stretch: 2; font-weight: 600; }
                             Label { text: album.artist; horizontal-stretch: 1; color: Palette.muted; }
-                            Label { text: album.year; width: 55px; color: Palette.muted; }
+                            Label { text: album.year; width: 48px; color: Palette.muted; }
                         }
+                        accessible-role: button;
+                        accessible-label: album.title;
+                        accessible-action-default => { root.select-album(album.key); }
                         tile := RowInput {
+                            x: 0; y: 0; width: parent.width; height: parent.height;
                             mouse-cursor: pointer;
                             activate => { root.select-album(album.key); }
                             double-clicked => { root.album-action(album.key, 0, -1); }

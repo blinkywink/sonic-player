@@ -3202,5 +3202,62 @@ mod drag_tests {
         assert!(center(&now_playing).x < 800.0);
         now_playing.invoke_accessible_default_action();
         assert_eq!(ui.get_page(), 1);
+
+        // Drive the real gallery with a small fixture, including its resize callback.
+        ui.set_page(0);
+        ui.set_albums(ModelRc::new(VecModel::from(
+            (0..6)
+                .map(|index| Album {
+                    key: index.to_string().into(),
+                    title: format!("Album {index}").into(),
+                    ..Album::default()
+                })
+                .collect::<Vec<_>>(),
+        )));
+        let set_rows = |ui: &Sonic, columns: i32| {
+            ui.set_album_rows(ModelRc::new(VecModel::from(
+                (0..6)
+                    .step_by(columns as usize)
+                    .map(|offset| AlbumRow {
+                        offset,
+                        count: columns.min(6 - offset),
+                        heading: "".into(),
+                    })
+                    .collect::<Vec<_>>(),
+            )));
+        };
+        set_rows(&ui, 2);
+        let weak = ui.as_weak();
+        ui.on_request_visible_art(move |_, _, _, columns| {
+            if let Some(ui) = weak.upgrade() {
+                set_rows(&ui, columns);
+            }
+        });
+        ui.set_connected(true);
+        let album = |index| {
+            ElementQuery::from_root(&ui)
+                .match_accessible_label(&format!("Album {index}"))
+                .find_first()
+                .unwrap()
+        };
+        let initial = center(&album(0));
+        i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(200));
+        assert!(center(&album(2)).y > initial.y);
+        ui.window().set_size(PhysicalSize::new(1220, 760));
+        let _ = center(&album(0));
+        i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(200));
+        assert_eq!(center(&album(2)).y, center(&album(0)).y);
+
+        let weak = ui.as_weak();
+        ui.on_select_album(move |key| weak.unwrap().set_selected_key(key));
+        let actions = Rc::new(std::cell::RefCell::new(Vec::new()));
+        let observed = actions.clone();
+        ui.on_album_action(move |key, action, _| observed.borrow_mut().push((key, action)));
+        let location = center(&album(2));
+        drag(ui.window(), location, 0.0);
+        assert_eq!(ui.get_selected_key(), "2");
+        assert!(actions.borrow().is_empty());
+        drag(ui.window(), location, 0.0);
+        assert_eq!(actions.borrow().as_slice(), &[("2".into(), 0)]);
     }
 }
