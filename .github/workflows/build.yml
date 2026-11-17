@@ -1,68 +1,28 @@
-name: Build Sonic desktop apps
+name: Build Sonic
 
 on:
   push:
-    tags:
-      - "v*"
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
-  build-mac:
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-      - name: Install dependencies
-        run: npm ci
-      - name: Build and package macOS app (no publish)
-        run: |
-          npm run build
-          node scripts/prepare-mac-app.cjs
-          npx electron-builder --mac --publish never
-      - name: Upload macOS artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: sonic-mac
-          path: dist/Sonic-*-arm64.dmg
-
-  build-windows:
+  windows:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - name: Update Rust stable
+        run: rustup update stable --no-self-update
+      - name: Test
+        run: cargo test --release --locked --manifest-path native/Cargo.toml
+      - name: Build
+        run: cargo build --release --locked --manifest-path native/Cargo.toml
+      - uses: actions/upload-artifact@v4
         with:
-          node-version: 22
-      - name: Install dependencies
-        run: npm ci
-      - name: Build and package Windows app (no publish)
-        run: |
-          npm run build
-          node scripts/prepare-mac-app.cjs
-          npx electron-builder --win --x64 --publish never
-      - name: Upload Windows artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: sonic-windows
-          path: dist/*.exe
-
-  build-linux:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-      - name: Install dependencies
-        run: npm ci
-      - name: Build and package Linux app (no publish)
-        run: |
-          npm run build
-          node scripts/prepare-mac-app.cjs
-          npx electron-builder --linux --publish never
-      - name: Upload Linux artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: sonic-linux
-          path: dist/*.AppImage
-
+          name: sonic-windows-x64
+          path: native/target/release/sonic-native.exe
+          if-no-files-found: error

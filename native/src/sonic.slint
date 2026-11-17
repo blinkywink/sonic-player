@@ -1,0 +1,1189 @@
+import { ComboBox, LineEdit, ListView, ScrollView, Slider } from "std-widgets.slint";
+
+export struct Album { key: string, title: string, artist: string, year: string, art: image, }
+export struct AlbumRow { offset: int, count: int, heading: string, }
+export struct Track { key: string, number: int, title: string, time: string, }
+export struct PlaylistCard { name: string, count: int, artwork: image, has-art: bool, }
+export struct QueueTrack { title: string, artist: string, album: string, album-key: string, time: string, number: int, art: image, }
+export struct SongHit { album-key: string, track-index: int, number: int, title: string, description: string, time: string, art: image, }
+export struct QueueLine { index: int, height: int, grouped: bool, track: QueueTrack, number: int, }
+
+export global Palette {
+    in property <color> text: #e8eef4;
+    in property <color> muted: #9ca8b8;
+    in property <color> background: #0f172a;
+    in property <color> panel: #1c2c50;
+    in property <color> border: #243866;
+    in property <color> surface: #1c2c50;
+    in property <color> hover: #233452;
+    in property <color> selected: #28477d;
+    in property <color> accent: #264ba2;
+}
+
+component Label inherits Text {
+    color: Palette.text;
+    vertical-alignment: center;
+    overflow: elide;
+}
+
+component Action inherits Rectangle {
+    in property <string> label;
+    in property <bool> active;
+    callback clicked;
+    accessible-role: button;
+    accessible-label: label;
+    accessible-action-default => { clicked(); }
+    height: 38px;
+    border-radius: 8px;
+    background: active ? Palette.accent : hit.has-hover ? Palette.hover : Palette.surface;
+    border-width: 1px;
+    border-color: Palette.border;
+    Label { text: root.label; horizontal-alignment: center; font-weight: 600; }
+    hit := TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
+}
+
+component IconButton inherits Rectangle {
+    in property <image> icon;
+    in property <string> label;
+    in property <bool> selected;
+    in property <bool> filled;
+    in property <bool> compact;
+    in property <bool> highlighted;
+    in property <string> badge;
+    callback clicked;
+    border-radius: compact ? 20px : 10px;
+    background: filled ? #ffffff : selected ? Palette.accent : hit.has-hover ? Palette.hover : transparent;
+    accessible-role: button;
+    accessible-label: label;
+    accessible-action-default => { clicked(); }
+    if badge == "": Image {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: compact ? 18px : 16px;
+        height: self.width;
+        source: root.icon;
+        colorize: filled ? #0f172a : highlighted ? Palette.accent : compact || selected ? Palette.text : Palette.muted;
+    }
+    if badge != "": Label {
+        text: root.badge; font-weight: 700; font-size: 12px;
+        color: Palette.accent; horizontal-alignment: center;
+    }
+    hit := TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
+}
+
+component PlayerRange inherits Rectangle {
+    in property <float> value;
+    in property <float> maximum: 1;
+    in property <string> label;
+    in property <bool> updates-live;
+    callback committed(float);
+    property <float> preview;
+    height: 20px;
+    accessible-role: slider;
+    accessible-label: label;
+    accessible-value: value + "";
+    track := Rectangle {
+        y: 7px; height: 6px; border-radius: 3px; background: Palette.border;
+        Rectangle { width: min(parent.width, max(0px, parent.width * (hit.pressed ? root.preview : root.value) / max(0.01, root.maximum))); border-radius: 3px; background: Palette.text; }
+    }
+    hit := TouchArea {
+        mouse-cursor: pointer;
+        moved => {
+            if self.pressed {
+                root.preview = clamp(self.mouse-x / root.width, 0, 1) * root.maximum;
+                if root.updates-live { root.committed(root.preview); }
+            }
+        }
+        pointer-event(event) => {
+            if event.kind == PointerEventKind.down {
+                root.preview = clamp(self.mouse-x / root.width, 0, 1) * root.maximum;
+                focus.focus();
+            }
+            if event.kind == PointerEventKind.up {
+                root.committed(clamp(self.mouse-x / root.width, 0, 1) * root.maximum);
+            }
+        }
+    }
+    focus := FocusScope {
+        key-pressed(event) => {
+            if event.text == Key.LeftArrow {
+                root.committed(max(0, root.value - root.maximum * 0.05));
+                return accept;
+            }
+            if event.text == Key.RightArrow {
+                root.committed(min(root.maximum, root.value + root.maximum * 0.05));
+                return accept;
+            }
+            return reject;
+        }
+    }
+}
+
+component ReorderGrip inherits Rectangle {
+    in property <int> index;
+    in property <int> first;
+    in property <int> last;
+    in property <length> row-height;
+    callback target(int);
+    callback reorder(int);
+    pure callback map-distance(float) -> int;
+    in property <bool> uneven-rows;
+    property <int> destination: -1;
+    width: 24px;
+    accessible-role: button;
+    accessible-label: "Drag to reorder";
+    Label { text: "☰"; horizontal-alignment: center; color: Palette.muted; font-size: 14px; }
+    TouchArea {
+        mouse-cursor: self.pressed ? grabbing : grab;
+        pointer-event(event) => {
+            if event.button == PointerEventButton.left && event.kind == PointerEventKind.down {
+                root.destination = root.index;
+                root.target(root.index);
+            } else if event.kind == PointerEventKind.up && root.destination >= 0 {
+                let destination = root.destination;
+                root.destination = -1;
+                root.target(-1);
+                if destination != root.index { root.reorder(destination - root.index); }
+            } else if event.kind == PointerEventKind.cancel {
+                root.destination = -1;
+                root.target(-1);
+            }
+        }
+        moved => {
+            if self.pressed && root.destination >= 0 {
+                root.destination = root.uneven-rows
+                    ? root.map-distance((self.mouse-y - self.pressed-y) / 1px)
+                    : clamp(root.index + round((self.mouse-y - self.pressed-y) / root.row-height), root.first, root.last);
+                root.target(root.destination);
+            }
+        }
+    }
+}
+
+component SettingsCard inherits Rectangle {
+    background: Palette.surface;
+    border-color: Palette.border;
+    border-width: 1px;
+    border-radius: 12px;
+    VerticalLayout { padding: 20px; spacing: 10px; @children }
+}
+
+component RowInput inherits TouchArea {
+    callback activate;
+    clicked => { keyboard.focus(); root.activate(); }
+    keyboard := FocusScope {
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if root.enabled && (event.text == Key.Return || event.text == " ") {
+                root.activate();
+                return accept;
+            }
+            return reject;
+        }
+    }
+}
+
+component QueueTrackMenu inherits ContextMenuArea {
+    callback append();
+    callback shuffle-play();
+    callback add-to-playlist();
+    Menu {
+        MenuItem { title: "Add to queue"; activated => { root.append(); } }
+        MenuItem { title: "Shuffle play"; activated => { root.shuffle-play(); } }
+        MenuItem { title: "Add to playlist"; activated => { root.add-to-playlist(); } }
+    }
+}
+
+export component Sonic inherits Window {
+    icon: @image-url("../assets/icon.png");
+    title: root.playing ? "Sonic — " + root.track-title : "Sonic";
+    preferred-width: 1220px;
+    preferred-height: 760px;
+    min-width: 800px;
+    min-height: 500px;
+    background: Palette.background;
+    default-font-family: ["Segoe UI", "Georgia", "Inter", "Courier New", "Trebuchet MS", "Palatino Linotype"][root.font-index];
+    default-font-size: 14px;
+
+    in property <[Album]> albums;
+    in property <[SongHit]> song-hits;
+    property <bool> searching;
+    callback prefetch-album-tracks(string);
+    callback play-search-hit(string, int);
+    in property <[AlbumRow]> album-rows;
+    in property <image> selected-art;
+    in property <bool> local-enabled;
+    in property <string> local-folder;
+    in property <string> local-status;
+    in property <int> local-count;
+    callback start-local;
+    callback open-local-folder;
+    callback refresh-library;
+    callback sort-albums(int);
+    callback group-albums(int);
+    callback album-action(string, int, int);
+    callback track-action(int, int, int);
+    callback queue-track-action(int, int, int);
+    callback filter-local(bool);
+    in property <[Track]> tracks;
+    in property <[string]> playlists;
+    in property <[PlaylistCard]> playlist-cards;
+    in property <image> playlist-cover;
+    in property <bool> playlist-has-art;
+    callback choose-playlist-cover;
+    in property <[QueueTrack]> playlist-items;
+    in-out property <int> playlist-current: -1;
+    in-out property <int> playlist-target: -1;
+    in property <string> playlist-name;
+    in property <string> theme-value: "#0f172a";
+    in-out property <int> text-mode;
+    in-out property <int> font-index;
+    in property <[float]> eq-gains;
+    in property <float> eq-preamp;
+    in-out property <int> eq-preset-index;
+    in property <string> eq-line;
+    in property <string> eq-area;
+    in property <bool> normalizer-enabled;
+    callback toggle-normalizer;
+    callback eq-band(int, float);
+    callback eq-level(float);
+    callback eq-preset(int);
+    in-out property <bool> auto-art-theme;
+    property <bool> confirm-delete-playlist;
+    callback playlist-selected(int);
+    callback playlist-queue-action(int, bool);
+    callback create-playlist(string);
+    callback rename-playlist(string);
+    callback delete-playlist;
+    callback add-to-playlist(int, int);
+    callback play-playlist(int);
+    callback remove-playlist-track(int);
+    callback move-playlist-track(int, int);
+    callback save-theme(string);
+    callback refresh-theme;
+    callback sign-out;
+    callback reset-art;
+    in-out property <string> discord-id;
+    in-out property <string> discord-image;
+    in property <string> discord-status;
+    callback discord-test;
+    in property <string> lastfm-status: "Disconnected";
+    in property <bool> lastfm-pending;
+    in property <bool> lastfm-connected;
+    callback connect-lastfm(string, string);
+    callback approve-lastfm;
+    callback disconnect-lastfm;
+    callback test-lastfm;
+
+    in-out property <int> streaming-local: 2;
+    in-out property <int> streaming-remote: 2;
+    callback refresh-connection;
+    in property <bool> refreshing-connection;
+    in property <string> connection-status;
+    in property <string> streaming-endpoint;
+    in property <string> cache-status;
+    in property <string> connection-type;
+    in property <string> queue-duration;
+    out property <int> dragged-track: -1;
+    property <int> drop-track: -1;
+    property <bool> editing-playlist;
+    out property <int> playlist-drag: -1;
+    property <int> playlist-drop: -1;
+    in property <[QueueTrack]> queue;
+    in property <[QueueLine]> queue-lines;
+    pure callback queue-drop-index(int, float) -> int;
+    in property <int> current-track: -1;
+    in property <bool> shuffled;
+    in property <int> repeat-mode;
+    in property <float> volume-level: 80;
+    in property <image> playing-art;
+    in-out property <int> page;
+    property <int> prior-page;
+    property <int> settings-tab;
+    property <bool> playlist-picker;
+    property <string> playlist-album-key;
+    property <int> playlist-track-index: -1;
+    property <int> playlist-queue-index: -1;
+    function open-playlist-picker(album-key: string, track-index: int) {
+        playlist-queue-index = -1;
+        playlist-album-key = album-key;
+        playlist-track-index = track-index;
+        playlist-picker = true;
+    }
+    function choose-playlist(index: int) {
+        if index >= 0 {
+            if playlist-queue-index >= 0 {
+                root.queue-track-action(playlist-queue-index, 3, index);
+            } else if playlist-track-index >= 0 {
+                root.track-action(playlist-track-index, 3, index);
+            } else {
+                root.album-action(playlist-album-key, 3, index);
+            }
+            playlist-picker = false;
+        }
+    }
+    property <bool> creating-playlist;
+    property <bool> sidebar-collapsed;
+    callback close-album;
+    in-out property <bool> list-mode;
+    in-out property <bool> layout-locked;
+    in-out property <length> sidebar-width: 260px;
+    in-out property <length> track-panel-width: 245px;
+    callback select-queue(int);
+    callback move-queue(int, int);
+    callback remove-queue(int);
+    callback clear-queue;
+    callback shuffle;
+    callback repeat;
+    callback mute;
+    in property <string> selected-key;
+    in property <string> album-title;
+    in property <string> album-artist;
+    in property <bool> track-loading;
+    in-out property <string> playback-error;
+    in property <string> track-key;
+    in property <string> track-title: "—";
+    in property <string> track-artist: "No track";
+    in property <string> status: "Connect Plex to browse your music.";
+    in property <bool> connected;
+    in property <bool> connecting;
+    in property <bool> playing;
+    in property <float> duration;
+    in property <float> position;
+    in property <string> elapsed: "0:00";
+    in property <string> total: "0:00";
+    callback sign-in;
+    in property <bool> local-picker;
+    callback open-files;
+    callback search(string);
+    callback select-album(string);
+    callback select-track(int);
+    callback prefetch-library-track(string, int);
+    callback toggle-play;
+    callback next-track;
+    callback previous-track;
+    callback seek(float);
+    callback volume(float);
+
+    callback request-visible-art(float, float, float, int);
+
+    HorizontalLayout {
+        spacing: 0px;
+        if root.page != 1 || !root.sidebar-collapsed: Rectangle {
+            width: root.sidebar-width;
+            background: Palette.surface;
+            clip: true;
+            Rectangle { x: parent.width - 1px; width: 1px; background: Palette.border; }
+            VerticalLayout {
+                padding: 20px;
+                spacing: 18px;
+                Rectangle {
+                    height: 56px;
+                    Image {
+                        x: (parent.width - self.width) / 2;
+                        y: 4px;
+                        width: min(parent.width, 185px);
+                        height: 48px;
+                        source: @image-url("../assets/sonic-title.png");
+                        image-fit: contain;
+                    }
+                    TouchArea { mouse-cursor: pointer; clicked => { root.page = 0; } }
+                }
+                HorizontalLayout {
+                    spacing: 6px;
+                    property <length> size: (self.width - 18px) / 4;
+                    height: self.size;
+                    IconButton { width: parent.size; label: "Home"; icon: @image-url("icons/home.svg"); selected: root.page == 0; clicked => { root.page = 0; } }
+                    IconButton { width: parent.size; label: "Queue"; icon: @image-url("icons/queue.svg"); selected: root.page == 2; clicked => { root.page = 2; } }
+                    IconButton { width: parent.size; label: "Playlists"; icon: @image-url("icons/playlists.svg"); selected: root.page == 3; clicked => { root.page = 3; } }
+                    IconButton { width: parent.size; label: "Settings"; icon: @image-url("icons/settings.svg"); selected: root.page == 4; clicked => { root.page = 4; } }
+                }
+                if root.selected-key != "": VerticalLayout {
+                    spacing: 7px;
+                    Rectangle {
+                        height: root.sidebar-width - 40px;
+                        background: Palette.background;
+                        border-radius: 8px;
+                        clip: true;
+                        Image { source: root.selected-art; image-fit: cover; }
+                        Action { x: parent.width - self.width - 6px; y: 6px; label: "×"; width: 26px; height: 22px; clicked => { root.close-album(); } }
+                    }
+                    Label { text: root.album-title; height: 17px; font-size: 13px; font-weight: 600; }
+                    Label { text: root.album-artist == "" ? "—" : root.album-artist; height: 14px; font-size: 11px; color: Palette.muted; }
+                    ScrollView {
+                        VerticalLayout {
+                            spacing: 4px;
+                            for track[index] in root.tracks: Rectangle {
+                                height: 37px;
+                                border-radius: 6px;
+                                property <bool> current: root.track-key == track.key && root.track-key != "";
+                                accessible-role: button;
+                                accessible-label: track.title;
+                                accessible-action-default => { root.select-track(index); }
+                                background: current ? Palette.selected : item.has-hover ? Palette.hover : Palette.surface;
+                                if current: Rectangle { x: 0; y: 0; width: 3px; height: parent.height; background: Palette.accent; }
+                                HorizontalLayout {
+                                    padding-left: 8px;
+                                    padding-right: 8px;
+                                    spacing: 8px;
+                                    Label { text: current ? "▶" : (track.number > 0 ? track.number : index + 1) + ""; width: 20px; font-size: 12px; color: current ? Palette.text : Palette.muted; }
+                                    Label { text: track.title; horizontal-stretch: 1; font-size: 12px; }
+                                    Label { text: track.time; width: 37px; color: Palette.muted; font-size: 12px; }
+                                }
+                                item := RowInput {
+                                    mouse-cursor: pointer;
+                                    activate => { root.select-track(index); }
+                                    pointer-event(e) => {
+                                        if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
+                                            root.prefetch-library-track("", index);
+                                        }
+                                    }
+                                }
+                                Timer {
+                                    interval: 100ms; running: item.has-hover;
+                                    triggered => { self.stop(); root.prefetch-library-track("", index); }
+                                }
+                                ContextMenuArea {
+                                    Menu {
+                                        MenuItem { title: "Add to queue"; activated => { root.track-action(index, 1, -1); } }
+                                        MenuItem { title: "Shuffle play"; activated => { root.track-action(index, 2, -1); } }
+                                        MenuItem { title: "Add to playlist"; activated => { root.open-playlist-picker("", index); } }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if root.selected-key == "" && (root.connected || root.local-count > 0 || root.queue.length > 0): VerticalLayout {
+                    spacing: 12px;
+                    Label { text: "QUEUE · " + max(0, root.queue.length - max(0, root.current-track)); font-size: 14px; font-weight: 600; height: 23px; }
+                    ListView {
+                        for row in max(0, root.queue.length - max(0, root.current-track)): Rectangle {
+                            property <int> index: row + max(0, root.current-track);
+                            property <QueueTrack> track: root.queue[index];
+                            height: 48px;
+                            background: root.current-track == index ? Palette.selected : Palette.surface;
+                            border-radius: 8px;
+                            HorizontalLayout {
+                                padding: 6px; spacing: 6px;
+                                Rectangle {
+                                    horizontal-stretch: 1;
+                                    VerticalLayout {
+                                        Label { text: track.title; font-size: 13px; font-weight: 600; }
+                                        Label { text: track.artist; font-size: 11px; color: Palette.muted; }
+                                    }
+                                    RowInput { mouse-cursor: pointer; activate => { root.select-queue(index); } }
+                                    QueueTrackMenu {
+                                        append => { root.queue-track-action(index, 1, -1); }
+                                        shuffle-play => { root.queue-track-action(index, 2, -1); }
+                                        add-to-playlist => { root.playlist-queue-index = index; root.playlist-picker = true; }
+                                    }
+                                }
+                                Action { width: 26px; height: 26px; label: "×"; clicked => { root.remove-queue(index); } }
+                            }
+                        }
+                    }
+                }
+                if root.selected-key == "" && !root.connected && root.local-count == 0 && root.queue.length == 0: Rectangle { vertical-stretch: 1; }
+            }
+            if !root.layout-locked: Rectangle {
+                x: parent.width - 8px;
+                width: 8px;
+                background: Palette.border;
+                TouchArea {
+                    mouse-cursor: col-resize;
+                    moved => { if self.pressed { root.sidebar-width = clamp(root.sidebar-width + self.mouse-x - self.pressed-x, 200px, 420px); } }
+                }
+            }
+        }
+        VerticalLayout {
+            horizontal-stretch: 1;
+            spacing: 0px;
+            HorizontalLayout {
+                vertical-stretch: 1;
+                if root.page == 0 && !root.connected && !root.local-enabled: Rectangle {
+                    horizontal-stretch: 1;
+                    VerticalLayout {
+                        x: 24px; y: 40px;
+                        width: min(420px, parent.width - 48px);
+                        spacing: 12px;
+                        alignment: start;
+                        Rectangle {
+                            height: 110px;
+                            border-width: 1px; border-color: Palette.border; border-radius: 18px;
+                            VerticalLayout {
+                                padding: 20px;
+                                spacing: 8px;
+                                Label { text: "No music source connected"; height: 22px; font-size: 18px; font-weight: 600; }
+                                Text { text: "Go to Settings to connect Plex or turn on local files to browse and play music here."; wrap: word-wrap; color: Palette.text; font-size: 13px; }
+                            }
+                        }
+                        Action { width: 121px; height: 38px; label: "Open Settings"; active: true; clicked => { root.page = 4; } }
+                    }
+                }
+            if root.page == 0 && (root.connected || root.local-enabled): VerticalLayout {
+                horizontal-stretch: 1;
+                padding: 20px;
+                spacing: 12px;
+                HorizontalLayout {
+                    height: 38px;
+                    spacing: 8px;
+                    LineEdit {
+                        horizontal-stretch: 1; max-width: 400px;
+                        placeholder-text: "Search songs and albums…";
+                        edited(text) => { root.searching = text != ""; grid.content-y = 0px; root.search(text); }
+                    }
+                    if root.local-count > 0: ComboBox { width: 110px; model: ["All music", "Local files"]; selected => { root.filter-local(self.current-index == 1); } }
+                    Action { width: 75px; label: "Refresh"; clicked => { root.refresh-library(); } }
+                    ComboBox {
+                        width: 137px;
+                        model: ["Title (A–Z)", "Title (Z–A)", "Artist (A–Z)", "Artist (Z–A)", "Year (newest)", "Year (oldest)"];
+                        selected => { grid.content-y = 0px; root.sort-albums(self.current-index); }
+                    }
+                    ComboBox { width: 82px; model: ["None", "Artist", "Year"]; selected => { grid.content-y = 0px; root.group-albums(self.current-index); } }
+                    Action { width: 36px; label: "▦"; active: !root.list-mode; clicked => { root.list-mode = false; grid.content-y = 0px; } }
+                    Action { width: 36px; label: "≡"; active: root.list-mode; clicked => { root.list-mode = true; grid.content-y = 0px; } }
+                }
+                if root.albums.length == 0: Label {
+                    text: root.local-enabled ? root.local-status : "No albums found.";
+                    color: Palette.muted;
+                    height: 22px;
+                }
+                HorizontalLayout {
+                    spacing: 24px;
+                    if root.searching: VerticalLayout {
+                        horizontal-stretch: 1; spacing: 12px;
+                        Label { text: "SONGS"; font-size: 11px; font-weight: 600; height: 17px; color: Palette.muted; }
+                        ListView {
+                            for hit in root.song-hits: Rectangle {
+                                height: 64px;
+                                Rectangle {
+                                    height: 60px; border-radius: 10px; background: Palette.surface;
+                                    HorizontalLayout {
+                                        padding-left: 12px; padding-right: 12px; spacing: 12px;
+                                        Rectangle {
+                                            width: 40px; height: 40px; border-radius: 8px; clip: true; background: Palette.background;
+                                            Image { source: hit.art; image-fit: cover; }
+                                        }
+                                        Label { text: hit.number + ""; width: 20px; font-size: 12px; color: Palette.muted; }
+                                        VerticalLayout {
+                                            horizontal-stretch: 1; alignment: center; spacing: 2px;
+                                            Label { text: hit.title; height: 18px; font-weight: 500; }
+                                            Label { text: hit.description; height: 15px; font-size: 12px; color: Palette.muted; }
+                                        }
+                                        Label { text: hit.time; width: 32px; font-size: 12px; color: Palette.muted; }
+                                    }
+                                    song := RowInput {
+                                        mouse-cursor: pointer;
+                                        activate => { root.play-search-hit(hit.album-key, hit.track-index); }
+                                        pointer-event(e) => {
+                                            if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
+                                                root.prefetch-library-track(hit.album-key, hit.track-index);
+                                            }
+                                        }
+                                    }
+                                    Timer {
+                                        interval: 100ms; running: song.has-hover;
+                                        triggered => { self.stop(); root.prefetch-library-track(hit.album-key, hit.track-index); }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    VerticalLayout {
+                        horizontal-stretch: 1; spacing: 12px;
+                        if root.searching: Label { text: "ALBUMS"; font-size: 11px; font-weight: 600; height: 17px; color: Palette.muted; }
+                grid := ListView {
+                    horizontal-stretch: 1;
+                    property <int> columns: root.list-mode ? 1 : max(1, floor(self.visible-width / 154px));
+                    property <length> row-height: root.list-mode ? 62px : self.tile-width + 37px;
+                    property <length> tile-width: self.visible-width / self.columns;
+                    for row in root.album-rows: Rectangle {
+                      height: grid.row-height + (row.heading == "" ? 0px : 27px);
+                      if row.heading != "": Label { y: 0px; height: 23px; text: row.heading; font-size: 14px; font-weight: 600; color: Palette.muted; }
+                      for column in row.count: Rectangle {
+                        property <Album> album: root.albums[row.offset + column];
+                        x: column * grid.tile-width;
+                        y: row.heading == "" ? 0px : 27px;
+                        width: grid.tile-width - 10px;
+                        height: grid.row-height - (root.list-mode ? 5px : 10px);
+                        border-radius: 10px;
+                        background: root.list-mode ? (root.selected-key == album.key ? Palette.selected : tile.has-hover ? Palette.hover : Palette.surface) : transparent;
+                        if !root.list-mode: VerticalLayout {
+                            spacing: 3px;
+                            Rectangle {
+                                height: grid.tile-width - 10px;
+                                background: root.selected-key == album.key ? Palette.selected : Palette.surface;
+                                border-radius: 12px; border-color: root.selected-key == album.key ? Palette.accent : Palette.border;
+                                border-width: root.selected-key == album.key ? 2px : 1px;
+                                clip: true;
+                                Image { source: album.art; image-fit: cover; }
+                            }
+                            Label { text: album.title; font-weight: 600; font-size: 13px; height: 16px; }
+                            Label { text: album.artist; color: Palette.muted; font-size: 12px; height: 15px; }
+                        }
+                        if root.list-mode: HorizontalLayout {
+                            padding: 6px;
+                            spacing: 11px;
+                            Image { width: 45px; source: album.art; image-fit: cover; }
+                            Label { text: album.title; horizontal-stretch: 2; font-weight: 600; }
+                            Label { text: album.artist; horizontal-stretch: 1; color: Palette.muted; }
+                            Label { text: album.year; width: 55px; color: Palette.muted; }
+                        }
+                        tile := RowInput {
+                            mouse-cursor: pointer;
+                            activate => { root.select-album(album.key); }
+                            double-clicked => { root.album-action(album.key, 0, -1); }
+                        }
+                        Timer {
+                            interval: 200ms;
+                            running: tile.has-hover;
+                            triggered => { self.stop(); root.prefetch-album-tracks(album.key); }
+                        }
+                        ContextMenuArea {
+                            Menu {
+                                MenuItem { title: "Add to queue"; activated => { root.album-action(album.key, 1, -1); } }
+                                MenuItem { title: "Shuffle play"; activated => { root.album-action(album.key, 2, -1); } }
+                                MenuItem { title: "Add to playlist"; activated => { root.open-playlist-picker(album.key, -1); } }
+                            }
+                        }
+                      }
+                    }
+                }
+                    }
+                }
+                Timer {
+                    interval: 180ms;
+                    running: root.connected || root.local-enabled;
+                    triggered => { root.request-visible-art(-grid.content-y / 1px, grid.visible-height / 1px, grid.row-height / 1px, grid.columns); }
+                }
+            }
+            if root.page == 1: Rectangle {
+                horizontal-stretch: 1;
+                IconButton {
+                    x: 36px; y: 36px; width: 32px; height: 32px;
+                    label: root.sidebar-collapsed ? "Show sidebar" : "Hide sidebar";
+                    icon: @image-url("icons/prev.svg");
+                    selected: true;
+                    clicked => { root.sidebar-collapsed = !root.sidebar-collapsed; }
+                }
+                if root.current-track >= 0: Rectangle {
+                    x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+                    width: min(480px, parent.width - 48px, parent.height - 48px);
+                    height: self.width;
+                    background: Palette.surface; border-radius: 16px; clip: true;
+                    Image { source: root.playing-art; image-fit: cover; }
+                }
+                if root.current-track < 0: VerticalLayout {
+                    alignment: center;
+                    spacing: 12px;
+                    Label { height: 56px; text: "♪"; horizontal-alignment: center; font-size: 48px; color: Palette.muted; opacity: 0.3; }
+                    Label { height: 25px; text: "Nothing playing. Pick something from Music or the Queue."; horizontal-alignment: center; color: Palette.muted; font-size: 15px; }
+                }
+            }
+            if root.page == 2: VerticalLayout {
+                horizontal-stretch: 1;
+                padding-left: 24px; padding-right: 24px; padding-top: 40px; padding-bottom: 16px;
+                spacing: 12px;
+                if root.queue.length > 0: HorizontalLayout {
+                    Label { text: "NOW & UP NEXT · " + (root.queue.length - max(0, root.current-track)) + " TRACKS · " + root.queue-duration; font-size: 15px; font-weight: 600; color: Palette.muted; horizontal-stretch: 1; }
+                    if root.queue.length > 0: Action { width: 90px; label: "Clear queue"; clicked => { root.clear-queue(); } }
+                }
+                if root.queue.length == 0: Label {
+                    text: root.connected ? "Queue is empty. Add tracks from Music." : "Sign in to Plex or enable local files in Settings to add and see your queue.";
+                    height: 32px; color: Palette.muted;
+                }
+                ListView {
+                    max-width: 776px;
+                    for line in root.queue-lines: Rectangle {
+                        height: line.height * 1px;
+                        if line.index < 0: HorizontalLayout {
+                            padding-bottom: 9px; spacing: 12px;
+                            Rectangle {
+                                width: 48px; height: 48px; border-radius: 9px; clip: true; background: Palette.surface;
+                                Image { source: line.track.art; image-fit: cover; }
+                            }
+                            VerticalLayout {
+                                alignment: center; spacing: 3px;
+                                Label { text: line.track.album == "" ? "—" : line.track.album; font-size: 15px; font-weight: 600; height: 19px; }
+                                Label { text: line.track.artist == "" ? "—" : line.track.artist; font-size: 13px; color: Palette.muted; height: 16px; }
+                            }
+                        }
+                        if line.index >= 0: Rectangle {
+                            height: parent.height - (line.grouped ? 4px : 0px);
+                            border-radius: line.grouped ? 8px : 0px;
+                            background: root.current-track == line.index ? Palette.selected : line.grouped ? Palette.surface : transparent;
+                            opacity: root.dragged-track == line.index ? 0.6 : 1;
+                            Rectangle { width: 3px; background: Palette.accent; visible: root.current-track == line.index; }
+                            Rectangle { height: 2px; background: Palette.accent; visible: root.drop-track == line.index && root.dragged-track != line.index; }
+                            HorizontalLayout {
+                                padding-left: line.grouped ? 10px : 3px; padding-right: 7px; spacing: 8px;
+                                if !line.grouped: Rectangle {
+                                    width: 38px; height: 38px; border-radius: 6px; clip: true; background: Palette.surface;
+                                    Image { source: line.track.art; image-fit: cover; }
+                                }
+                                ReorderGrip {
+                                    index: line.index; first: max(0, root.current-track); last: root.queue.length - 1;
+                                    row-height: line.height * 1px; uneven-rows: true;
+                                    map-distance(distance) => { return root.queue-drop-index(line.index, distance); }
+                                    target(row) => { root.dragged-track = row < 0 ? -1 : line.index; root.drop-track = row; }
+                                    reorder(delta) => { root.move-queue(line.index, delta); }
+                                }
+                                if line.grouped: Label { width: 18px; text: line.number + ""; font-size: 12px; color: Palette.muted; }
+                                Rectangle {
+                                    horizontal-stretch: 1;
+                                    VerticalLayout {
+                                        alignment: center; spacing: 2px;
+                                        Label { text: line.track.title; height: 18px; font-weight: root.current-track == line.index ? 600 : 500; }
+                                        if !line.grouped: Label { text: line.track.artist == "" ? "—" : line.track.artist; height: 15px; font-size: 12px; color: Palette.muted; }
+                                    }
+                                    RowInput { mouse-cursor: pointer; activate => { root.select-queue(line.index); } }
+                                    QueueTrackMenu {
+                                        append => { root.queue-track-action(line.index, 1, -1); }
+                                        shuffle-play => { root.queue-track-action(line.index, 2, -1); }
+                                        add-to-playlist => { root.playlist-queue-index = line.index; root.playlist-picker = true; }
+                                    }
+                                }
+                                if line.grouped: Label { text: line.track.time; width: 38px; font-size: 12px; color: Palette.muted; }
+                                Action { width: 22px; height: 22px; label: "×"; clicked => { root.remove-queue(line.index); } }
+                            }
+                        }
+                    }
+                }
+            }
+            if root.page == 3 && root.playlist-current < 0: VerticalLayout {
+                horizontal-stretch: 1;
+                padding-left: 24px; padding-top: 40px;
+                spacing: 21px;
+                HorizontalLayout {
+                    spacing: 10px; alignment: start;
+                    Label { text: "Playlists"; font-size: 24px; font-weight: 700; width: 98px; height: 34px; }
+                    Action { width: 34px; height: 34px; label: "+"; clicked => { root.creating-playlist = true; } }
+                }
+                if root.creating-playlist: HorizontalLayout {
+                    spacing: 7px; alignment: start;
+                    first-name := LineEdit { width: 215px; placeholder-text: "Playlist name"; accepted => { root.create-playlist(self.text == "" ? "New Playlist" : self.text); } }
+                    Action { width: 81px; label: "Create"; clicked => { root.create-playlist(first-name.text == "" ? "New Playlist" : first-name.text); } }
+                    Action { width: 76px; label: "Cancel"; clicked => { root.creating-playlist = false; } }
+                }
+                cards := ListView {
+                    property <int> columns: max(1, floor(self.visible-width / 155px));
+                    property <length> card-width: self.visible-width / self.columns;
+                    for row in ceil(root.playlist-cards.length / (self.columns * 1.0)): Rectangle {
+                        height: cards.card-width + 38px;
+                        for column in min(cards.columns, root.playlist-cards.length - row * cards.columns): Rectangle {
+                            property <int> index: row * cards.columns + column;
+                            property <PlaylistCard> card: root.playlist-cards[index];
+                            x: column * cards.card-width;
+                            width: cards.card-width - 14px;
+                            height: parent.height;
+                            VerticalLayout {
+                                spacing: 4px;
+                                Rectangle {
+                                    border-radius: 12px; background: Palette.surface; height: parent.width; clip: true;
+                                    if card.has-art: Image { source: card.artwork; image-fit: cover; }
+                                    if !card.has-art: Label { text: "♪"; font-size: 48px; horizontal-alignment: center; opacity: 0.4; }
+                                }
+                                Label { text: card.name; font-size: 14px; font-weight: 600; height: 18px; }
+                                Label { text: card.count + (card.count == 1 ? " track" : " tracks"); font-size: 11px; color: Palette.muted; height: 16px; }
+                            }
+                            RowInput {
+                                mouse-cursor: pointer;
+                                activate => { root.editing-playlist = false; root.confirm-delete-playlist = false; root.playlist-selected(index); }
+                                double-clicked => { root.playlist-selected(index); root.play-playlist(0); }
+                            }
+                            ContextMenuArea {
+                                Menu {
+                                    MenuItem { title: "Add to queue"; activated => { root.playlist-queue-action(index, false); } }
+                                    MenuItem { title: "Shuffle play"; activated => { root.playlist-queue-action(index, true); } }
+                                    MenuItem { title: "Delete"; activated => { root.playlist-selected(index); root.confirm-delete-playlist = true; } }
+                                }
+                            }
+                        }
+                    }
+                }
+                Rectangle { vertical-stretch: 1; }
+            }
+            if root.page == 3 && root.playlist-current >= 0: VerticalLayout {
+                horizontal-stretch: 1;
+                padding-left: 24px; padding-right: 24px; padding-top: 40px;
+                spacing: 10px;
+                Action { width: 132px; label: "‹ Back to playlists"; clicked => { root.playlist-selected(-1); root.creating-playlist = false; } }
+                HorizontalLayout {
+                    spacing: 17px; height: 146px;
+                    Rectangle {
+                        width: 146px; height: 146px; border-radius: 14px; background: Palette.surface; clip: true;
+                        if root.playlist-has-art: Image { source: root.playlist-cover; image-fit: cover; }
+                        if !root.playlist-has-art: Label { text: "♪"; font-size: 48px; horizontal-alignment: center; opacity: 0.4; }
+                        TouchArea { mouse-cursor: pointer; clicked => { if root.editing-playlist { root.choose-playlist-cover(); } } }
+                    }
+                    VerticalLayout {
+                        horizontal-stretch: 1; alignment: center; spacing: 4px;
+                        Label { text: root.playlist-name; font-size: 31px; font-weight: 700; height: 44px; }
+                        Label { text: root.playlist-items.length + " tracks"; color: Palette.muted; height: 24px; }
+                    }
+                }
+                    if root.playlist-current >= 0: HorizontalLayout {
+                        spacing: 6px;
+                        Action { width: 73px; label: "Play"; active: true; clicked => { root.play-playlist(0); } }
+                        Action { width: 100px; label: root.editing-playlist ? "Done" : "Edit playlist"; clicked => { root.editing-playlist = !root.editing-playlist; } }
+                        if root.editing-playlist: HorizontalLayout {
+                          spacing: 6px;
+                          rename-playlist := LineEdit { placeholder-text: "New name"; horizontal-stretch: 1; accepted => { root.rename-playlist(self.text); self.text = ""; } }
+                        Action { width: 72px; label: "Rename"; clicked => { root.rename-playlist(rename-playlist.text); rename-playlist.text = ""; } }
+                        Action { width: 107px; label: root.confirm-delete-playlist ? "Confirm delete" : "Delete"; clicked => {
+                            if root.confirm-delete-playlist { root.delete-playlist(); root.confirm-delete-playlist = false; }
+                            else { root.confirm-delete-playlist = true; }
+                        } }
+                        }
+                    }
+                    Label {
+                        text: root.playlist-items.length > 0 ? root.playlist-items.length + " tracks" : "Add tracks from the Music view.";
+                        height: 23px; color: Palette.muted;
+                    }
+                    ListView {
+                        for row[track-index] in root.playlist-items: Rectangle {
+                            height: 57px;
+                            border-radius: 7px;
+                            opacity: root.playlist-drag == track-index ? 0.6 : 1;
+                            background: Palette.surface;
+                            Rectangle { height: 2px; background: Palette.accent; visible: root.playlist-drop == track-index && root.playlist-drag != track-index; }
+                            HorizontalLayout {
+                                padding: 4px;
+                                spacing: 6px;
+                                Rectangle {
+                                    width: 41px; height: 41px; border-radius: 8px; clip: true; background: Palette.background;
+                                    Image { source: row.art; image-fit: cover; }
+                                }
+                                Rectangle {
+                                    horizontal-stretch: 1;
+                                    VerticalLayout {
+                                        alignment: center; spacing: 2px;
+                                        Label { text: row.title; font-size: 13px; font-weight: 600; height: 18px; }
+                                        Label { text: row.artist + " · " + row.album; font-size: 11px; color: Palette.muted; height: 15px; }
+                                    }
+                                    RowInput { enabled: !root.editing-playlist; mouse-cursor: pointer; activate => { root.play-playlist(track-index); } }
+                                }
+                                Label { text: row.time; width: 43px; color: Palette.muted; }
+                                if root.editing-playlist: ReorderGrip {
+                                    index: track-index;
+                                    first: 0;
+                                    last: root.playlist-items.length - 1;
+                                    row-height: 57px;
+                                    target(row) => { root.playlist-drag = row < 0 ? -1 : track-index; root.playlist-drop = row; }
+                                    reorder(delta) => { root.move-playlist-track(track-index, delta); }
+                                }
+                                if root.editing-playlist: Action { width: 29px; label: "×"; clicked => { root.remove-playlist-track(track-index); } }
+                            }
+                        }
+                    }
+            }
+            if root.page == 4: ScrollView {
+                horizontal-stretch: 1;
+                VerticalLayout {
+                    padding-left: 24px; padding-right: 24px; padding-top: 40px; padding-bottom: 16px;
+                    spacing: 24px;
+                    HorizontalLayout {
+                        spacing: 8px; alignment: start;
+                        for name[index] in ["Playback", "Appearance", "Library", "Tracking"]: Action {
+                            width: index == 1 ? 114px : index == 2 ? 81px : 94px;
+                            label: name;
+                            active: root.settings-tab == index;
+                            clicked => { root.settings-tab = index; }
+                        }
+                    }
+                    if root.settings-tab == 0: SettingsCard {
+                        Label { text: "Parametric EQ & normalization"; font-weight: 700; font-size: 16px; height: 23px; }
+                        HorizontalLayout {
+                            spacing: 10px; alignment: start;
+                            Action { width: 22px; height: 22px; label: root.normalizer-enabled ? "✓" : ""; active: root.normalizer-enabled; clicked => { root.toggle-normalizer(); } }
+                            Label { text: "Loudness normalizer"; height: 22px; }
+                        }
+                        Label { text: "Reduces volume differences between tracks so quiet songs and loud songs play at a more even level."; height: 22px; color: Palette.muted; font-size: 13px; }
+                        Label { text: "Preset or adjust each band (dB). Applied to playback."; height: 26px; color: Palette.muted; font-size: 13px; }
+                        Rectangle {
+                            height: 96px;
+                            Rectangle { x: 32px; width: parent.width - 48px; y: 37px; height: 1px; background: Palette.border; }
+                            if root.eq-area != "": Path {
+                                x: 32px; y: 8px; width: parent.width - 48px; height: 58px;
+                                viewbox-width: 1000; viewbox-height: 58;
+                                commands: root.eq-area;
+                                fill: @linear-gradient(180deg, Palette.accent.with-alpha(0.35) 0%, Palette.accent.with-alpha(0.05) 100%);
+                            }
+                            if root.eq-line != "": Path {
+                                x: 32px; y: 8px; width: parent.width - 48px; height: 58px;
+                                viewbox-width: 1000; viewbox-height: 58;
+                                commands: root.eq-line; stroke: Palette.accent; stroke-width: 2px;
+                            }
+                            for name[index] in ["25","35","49","69","97","137","192","270","380","534","750","1.1k","1.5k","2.1k","2.9k","4.1k","5.8k","8.1k","11.4k","16.0k"]: Label {
+                                text: name; font-size: 8px; width: 30px;
+                                x: 17px + index * (parent.width - 48px) / 19; y: 73px; height: 13px;
+                                horizontal-alignment: center; color: Palette.muted;
+                            }
+                        }
+                        HorizontalLayout {
+                            spacing: 12px; alignment: start;
+                            Label { text: "Preamp"; width: 80px; color: Palette.muted; font-size: 13px; }
+                            Slider { width: 120px; minimum: -12; maximum: 12; step: 1; value: root.eq-preamp; changed(value) => { root.eq-level(value); } }
+                            Label { text: (root.eq-preamp > 0 ? "+" : "") + root.eq-preamp + " dB"; width: 60px; color: Palette.muted; font-size: 13px; }
+                        }
+                        HorizontalLayout {
+                            spacing: 12px; alignment: start;
+                            Label { text: "Preset"; width: 80px; color: Palette.muted; font-size: 13px; }
+                            ComboBox { model: ["Flat", "Bass boost", "Treble boost", "Rock", "Jazz", "Classical", "Custom"]; width: 140px; current-index <=> root.eq-preset-index; selected => { root.eq-preset(self.current-index); } }
+                        }
+                        HorizontalLayout {
+                            spacing: 1px;
+                            for gain[index] in root.eq-gains: VerticalLayout {
+                                spacing: 7px;
+                                Label { text: (gain > 0 ? "+" : "") + gain; horizontal-alignment: center; font-size: 10px; height: 15px; color: Palette.muted; }
+                                Slider { orientation: vertical; height: 100px; minimum: -12; maximum: 12; step: 1; value: gain; changed(value) => { root.eq-band(index, value); } }
+                                Label {
+                                    text: ["25","35","49","69","97","137","192","270","380","534","750","1.1k","1.5k","2.1k","2.9k","4.1k","5.8k","8.1k","11.4k","16.0k"][index];
+                                    horizontal-alignment: center; font-size: 11px; height: 18px; color: Palette.muted;
+                                }
+                            }
+                        }
+                    }
+                    if root.settings-tab == 1: SettingsCard {
+                        Label { text: "Layout"; font-weight: 700; font-size: 16px; height: 23px; }
+                        HorizontalLayout {
+                            spacing: 12px; alignment: start;
+                            Label { text: "Sidebar & panels"; width: 96px; color: Palette.muted; font-size: 13px; }
+                            Action { width: 110px; label: root.layout-locked ? "Locked" : "Unlocked"; active: !root.layout-locked; clicked => { root.layout-locked = !root.layout-locked; } }
+                            Label { text: root.layout-locked ? "Resizing disabled" : "Drag edges to resize"; width: 155px; color: Palette.muted; font-size: 12px; }
+                        }
+                    }
+                    if root.settings-tab == 1: SettingsCard {
+                        Label { text: "Theme"; font-weight: 700; font-size: 16px; height: 23px; }
+                        Label { text: "Pick a color for backgrounds and accents. Text stays the same for readability."; height: 23px; color: Palette.muted; font-size: 13px; }
+                        HorizontalLayout {
+                            spacing: 8px; alignment: start;
+                            Label { text: "Theme seed"; width: 100px; color: Palette.muted; }
+                            Rectangle { width: 32px; height: 32px; border-radius: 6px; background: Palette.background; border-width: 1px; border-color: Palette.border; }
+                            theme-input := LineEdit { text: root.theme-value; width: 128px; accepted => { root.save-theme(self.text); } }
+                            Action { width: 80px; label: "Apply"; clicked => { root.save-theme(theme-input.text); } }
+                            Action { width: 80px; label: "Reset"; clicked => { root.save-theme("#0f172a"); theme-input.text = "#0f172a"; } }
+                        }
+                        HorizontalLayout {
+                            spacing: 8px; alignment: start;
+                            Label { text: "Text color"; width: 100px; color: Palette.muted; }
+                            ComboBox { width: 170px; model: ["Automatic", "Light", "Dark"]; current-index <=> root.text-mode; selected => { root.refresh-theme(); } }
+                        }
+                        Action { width: 263px; label: "Use album art color for theme when playing"; active: root.auto-art-theme; clicked => { root.auto-art-theme = !root.auto-art-theme; root.refresh-theme(); } }
+                    }
+                    if root.settings-tab == 1: SettingsCard {
+                        Label { text: "Font"; font-weight: 700; font-size: 16px; height: 23px; }
+                        HorizontalLayout {
+                            spacing: 12px; alignment: start;
+                            Label { text: "App font"; width: 100px; color: Palette.muted; font-size: 13px; }
+                            ComboBox { width: 190px; model: ["System default", "Georgia", "Inter", "Courier New", "Trebuchet MS", "Palatino"]; current-index <=> root.font-index; }
+                        }
+                    }
+                    if root.settings-tab == 2: SettingsCard {
+                        Label { text: "Local files"; font-size: 16px; font-weight: 700; height: 23px; }
+                        Text { text: "Add music from a folder on your computer. Sonic creates SonicMusic in your Music folder; put MP3, M4A, FLAC, OGG, WAV there, then refresh to load them into your library."; wrap: word-wrap; color: Palette.muted; font-size: 13px; height: 40px; }
+                        if !root.local-enabled: Action { width: 153px; label: "Enable local files"; clicked => { root.start-local(); } }
+                        if root.local-enabled: Label { text: root.local-folder; height: 24px; color: Palette.muted; }
+                        if root.local-enabled: HorizontalLayout {
+                            alignment: start; spacing: 8px;
+                            Action { width: 110px; label: "Open folder"; clicked => { root.open-local-folder(); } }
+                            Action { width: 100px; label: "Refresh"; clicked => { root.refresh-library(); } }
+                            Action { width: 150px; label: "Disable local files"; clicked => { root.start-local(); } }
+                        }
+                        if root.local-enabled: Label { text: root.local-status; height: 23px; color: Palette.muted; }
+                    }
+                    if root.settings-tab == 2: SettingsCard {
+                        Label { text: "Plex account"; font-size: 16px; font-weight: 700; height: 23px; }
+                        Label { text: root.connected || root.connecting ? root.status : root.status == "Connect Plex to browse your music." ? "Not connected" : root.status; color: Palette.muted; height: 24px; }
+                        Action {
+                            width: 140px;
+                            label: root.connected ? "Sign out of Plex" : root.connecting ? "Connecting…" : "Sign in with Plex";
+                            active: true;
+                            clicked => { if root.connected { root.sign-out(); } else if !root.connecting { root.sign-in(); } }
+                        }
+                    }
+                    if root.settings-tab == 2: SettingsCard {
+                        Label { text: "Streaming quality"; font-size: 16px; font-weight: 700; height: 23px; }
+                        Label { text: "The app uses your local network when possible. Choose quality for each case."; font-size: 13px; color: Palette.muted; height: 22px; }
+                        HorizontalLayout {
+                            spacing: 12px; alignment: start;
+                            Label { text: "On local network"; width: 140px; color: Palette.muted; font-size: 13px; }
+                            ComboBox { width: 130px; model: ["128 kbps", "256 kbps", "320 kbps", "Lossless"]; current-index <=> root.streaming-local; }
+                        }
+                        HorizontalLayout {
+                            spacing: 12px; alignment: start;
+                            Label { text: "On other networks"; width: 140px; color: Palette.muted; font-size: 13px; }
+                            ComboBox { width: 130px; model: ["128 kbps", "256 kbps", "320 kbps", "Lossless"]; current-index <=> root.streaming-remote; }
+                        }
+                        if root.connected: Label { text: "Streaming: Direct — " + root.streaming-endpoint; font-size: 12px; color: Palette.muted; height: 20px; }
+                        if root.connected: Label { text: "Connection: " + root.connection-type; font-size: 12px; color: Palette.muted; height: 20px; }
+                        if root.connected: Action {
+                            width: 218px;
+                            label: root.refreshing-connection ? "Checking…" : "Refresh connection & streaming";
+                            clicked => { root.refresh-connection(); }
+                        }
+                        if root.connected && root.connection-status != "": Label { text: root.connection-status; font-size: 12px; color: Palette.muted; height: 20px; }
+                    }
+                    if root.settings-tab == 2: SettingsCard {
+                        Label { text: "Cache"; font-size: 16px; font-weight: 700; height: 23px; }
+                        Label { text: "Clear API and image caches. Use if library or artwork is stale."; height: 22px; color: Palette.muted; }
+                        HorizontalLayout {
+                            alignment: start; spacing: 12px;
+                            Action { width: 105px; label: "Reset cache"; clicked => { root.reset-art(); } }
+                            if root.cache-status != "": Label { text: root.cache-status; font-size: 13px; color: Palette.muted; }
+                        }
+                    }
+                    if root.settings-tab == 3: SettingsCard {
+                        Label { text: "Discord Rich Presence"; font-size: 16px; font-weight: 700; height: 23px; }
+                        Text {
+                            text: "Show what you're listening to on Discord. Enter the Application ID from discord.com/developers. The Discord desktop app must be running.";
+                            wrap: word-wrap; color: Palette.muted; font-size: 13px; height: 38px;
+                        }
+                        HorizontalLayout {
+                            spacing: 8px; alignment: start;
+                            Label { text: "Application ID"; width: 108px; }
+                            LineEdit { text <=> root.discord-id; width: 235px; placeholder-text: "e.g. 1234567890123456789"; }
+                        }
+                        HorizontalLayout {
+                            spacing: 8px; alignment: start;
+                            Label { text: "Image key"; width: 108px; }
+                            LineEdit { text <=> root.discord-image; width: 235px; placeholder-text: "Optional"; }
+                        }
+                        Action { width: 114px; label: "Test connection"; clicked => { root.discord-test(); } }
+                        if root.discord-status != "": Label { text: root.discord-status; height: 22px; color: Palette.muted; }
+                    }
+                    if root.settings-tab == 3: SettingsCard {
+                    Label { text: "Last.fm Scrobbling"; font-size: 18px; font-weight: 700; height: 36px; }
+                    Label { text: root.lastfm-status; color: Palette.muted; height: 24px; }
+                    if !root.lastfm-connected: HorizontalLayout {
+                        spacing: 6px;
+                        fm-key := LineEdit { placeholder-text: "Last.fm API key"; width: 168px; }
+                        fm-secret := LineEdit { placeholder-text: "API secret"; input-type: password; width: 168px; }
+                        Action { width: 100px; label: "Connect"; clicked => { root.connect-lastfm(fm-key.text, fm-secret.text); fm-secret.text = ""; } }
+                    }
+                    if root.lastfm-pending: Action { label: "Finish Last.fm sign-in"; clicked => { root.approve-lastfm(); } }
+                    if root.lastfm-connected: HorizontalLayout {
+                        alignment: start; spacing: 8px;
+                        Action { width: 112px; label: "Test connection"; clicked => { root.test-lastfm(); } }
+                        Action { width: 134px; label: "Disconnect"; clicked => { root.disconnect-lastfm(); } }
+                    }
+                    }
+                }
+            }
+        }
+            footer := Rectangle {
+                height: 91px;
+                background: Palette.background;
+                Rectangle { height: 1px; background: Palette.border; }
+                property <bool> show-meta: self.width >= 720px;
+                property <bool> show-time: self.width >= 580px;
+                property <bool> show-extra: self.width >= 540px;
+                property <bool> show-volume: self.width >= 500px;
+                art := Rectangle {
+                    x: 16px; y: 9px;
+                    width: 72px; height: 72px;
+                    background: Palette.surface; border-radius: 6px; clip: true;
+                    Image { source: root.playing-art; image-fit: cover; }
+                }
+                if footer.show-meta: VerticalLayout {
+                    x: 98px; y: 0px; width: max(70px, parent.width / 2 - 225px);
+                    height: parent.height; alignment: center; spacing: 2px;
+                    HorizontalLayout {
+                        height: 18px; spacing: 8px;
+                        Label { text: root.track-title; font-weight: 600; horizontal-stretch: 1; }
+                        if root.track-loading: Label { text: "Loading…"; font-size: 11px; color: Palette.muted; }
+                    }
+                    Label { text: root.track-artist; height: 16px; color: Palette.muted; font-size: 12px; }
+                }
+                VerticalLayout {
+                    width: footer.show-extra ? 216px : 136px;
+                    x: (parent.width - self.width) / 2;
+                    height: 70px; y: 10px;
+                    spacing: 4px;
+                    HorizontalLayout {
+                        height: 40px; alignment: center; spacing: 4px;
+                        if footer.show-extra: IconButton { width: 36px; height: 36px; compact: true; label: "Shuffle"; icon: @image-url("icons/shuffle.svg"); highlighted: root.shuffled; clicked => { root.shuffle(); } }
+                        IconButton { width: 36px; height: 36px; compact: true; label: "Previous"; icon: @image-url("icons/prev.svg"); clicked => { root.previous-track(); } }
+                        Rectangle { width: 0px; }
+                        IconButton { width: 40px; height: 40px; compact: true; filled: true; label: root.playing ? "Pause" : "Play"; icon: root.playing ? @image-url("icons/pause.svg") : @image-url("icons/play.svg"); clicked => { root.toggle-play(); } }
+                        Rectangle { width: 0px; }
+                        IconButton { width: 36px; height: 36px; compact: true; label: "Next"; icon: @image-url("icons/next.svg"); clicked => { root.next-track(); } }
+                        if footer.show-extra: IconButton { width: 36px; height: 36px; compact: true; label: root.repeat-mode == 1 ? "Repeat all" : root.repeat-mode == 2 ? "Repeat one" : "Repeat off"; icon: @image-url("icons/repeat.svg"); badge: root.repeat-mode == 2 ? "1" : ""; highlighted: root.repeat-mode > 0; clicked => { root.repeat(); } }
+                    }
+                    HorizontalLayout {
+                        spacing: 10px;
+                        if footer.show-time: Label { text: root.elapsed; width: 32px; horizontal-alignment: right; color: Palette.muted; font-size: 11px; }
+                        PlayerRange { label: "Seek"; horizontal-stretch: 1; maximum: max(0.01, root.duration); value: root.position; committed(v) => { if root.duration > 0 { root.seek(v); } } }
+                        if footer.show-time: Label { text: root.total; width: 32px; color: Palette.muted; font-size: 11px; }
+                    }
+                }
+                HorizontalLayout {
+                    width: footer.show-volume ? 166px : 28px; height: 36px; x: parent.width - self.width - 16px; y: (parent.height - self.height) / 2;
+                    spacing: 8px;
+                    if footer.show-volume: IconButton { width: 26px; compact: true; label: root.volume-level == 0 ? "Unmute" : "Mute"; icon: root.volume-level == 0 ? @image-url("icons/mute.svg") : @image-url("icons/volume.svg"); clicked => { root.mute(); } }
+                    if footer.show-volume: PlayerRange { width: 96px; label: "Volume"; maximum: 100; value: root.volume-level; updates-live: true; committed(v) => { root.volume(v / 100); } }
+                    IconButton {
+                        width: 28px; compact: true;
+                        label: root.page == 1 ? "Exit fullscreen" : "Now Playing";
+                        icon: root.page == 1 ? @image-url("icons/collapse.svg") : @image-url("icons/expand.svg");
+                        clicked => {
+                            if root.page == 1 { root.page = root.prior-page; root.sidebar-collapsed = false; }
+                            else { root.prior-page = root.page; root.page = 1; }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if root.playback-error != "": Rectangle {
+        width: min(root.width * 0.9, 640px);
+        height: 52px;
+        x: (root.width - self.width) / 2; y: root.height - 80px - self.height;
+        background: Palette.surface; border-color: Palette.border; border-width: 1px; border-radius: 10px;
+        HorizontalLayout {
+            padding-left: 16px; padding-right: 12px; padding-top: 8px; padding-bottom: 8px; spacing: 12px;
+            error-label := Label { text: root.playback-error; color: Palette.accent; font-size: 13px; wrap: word-wrap; horizontal-stretch: 1; }
+            Action { label: "Dismiss"; width: 72px; clicked => { root.playback-error = ""; } }
+        }
+    }
+    if root.playlist-picker: Rectangle {
+        x: 0px; y: 0px; width: root.width; height: root.height;
+        background: #00000099;
+        TouchArea { clicked => { root.playlist-picker = false; } }
+        Rectangle {
+            width: min(360px, parent.width - 40px);
+            height: min(480px, 190px + root.playlists.length * 39px);
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            background: Palette.surface; border-radius: 12px; border-width: 1px; border-color: Palette.border;
+            TouchArea { }
+            VerticalLayout {
+                padding: 20px; spacing: 8px;
+                Label { text: "Add to playlist"; height: 24px; font-size: 17px; font-weight: 700; }
+                if root.playlists.length > 0: ListView {
+                    for name[index] in root.playlists: Action {
+                        height: 39px; label: name;
+                        clicked => { root.choose-playlist(index); }
+                    }
+                }
+                Label { text: root.playlists.length == 0 ? "Create a new playlist and add this." : "Create new"; height: 18px; font-size: 13px; color: Palette.muted; }
+                HorizontalLayout {
+                    alignment: start; spacing: 6px;
+                    input := LineEdit {
+                        horizontal-stretch: 1; placeholder-text: "Playlist name";
+                        accepted => {
+                            root.create-playlist(self.text == "" ? "New Playlist" : self.text);
+                            root.choose-playlist(root.playlist-target);
+                        }
+                    }
+                    Action { width: 105px; label: "Create and add"; active: true; clicked => {
+                        root.create-playlist(input.text == "" ? "New Playlist" : input.text);
+                        root.choose-playlist(root.playlist-target);
+                    } }
+                }
+                Action { width: 76px; label: "Cancel"; clicked => { root.playlist-picker = false; } }
+            }
+        }
+    }
+}

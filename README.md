@@ -1,54 +1,28 @@
-# Crystal Music
+<p align="center"><img alt="Sonic logo" src="native/assets/icon.png" width="96"></p>
 
-Web app + Node server for streaming music from Plex. Playlists, queue, and playback. Optional desktop tray app (macOS menu bar / Windows system tray) that runs the server and opens the app in your browser.
+# Sonic
 
-## Run in browser
+A native Plex and local music player built with Rust, Slint, and Rodio. Browse albums, manage your queue and playlists, tune the equalizer, and connect Discord Rich Presence or Last.fm.
 
-1. Start the backend:
-   ```bash
-   npm run server
-   ```
-2. Start the frontend (dev):
-   ```bash
-   npm run dev
-   ```
-3. Open http://localhost:1430 and sign in with Plex.
+## Run on Windows
 
-## Build for production
+Open a successful [Windows build](https://github.com/blinkywink/sonic-player/actions/workflows/build.yml) and download the `sonic-windows-x64` artifact. Extract it and run `sonic-native.exe`.
 
-```bash
-npm run build
+- **Plex:** Open **Settings → Library → Sign in with Plex**, approve Sonic in your browser, then return to the app.
+- **Local music:** Enable local files in **Settings → Library**, put music in the `SonicMusic` folder, and refresh. You can also pass audio file paths when launching Sonic.
+- **Discord and Last.fm:** Both are under **Settings → Tracking**. Discord uses an Application ID and an optional image asset key. Last.fm uses an API key and secret, followed by browser approval.
+
+On Windows, the Sonic tray menu has **Open Sonic**, **Run at startup**, and **Quit**. Closing the window keeps the player in the tray.
+
+## Build from source
+
+On Windows, install the Rust MSVC toolchain and Visual Studio C++ Build Tools with a Windows SDK. From the repository root:
+
+```powershell
+cargo build --release --locked --manifest-path native/Cargo.toml
+cargo test --release --locked --manifest-path native/Cargo.toml
 ```
 
-Then run the server with the built frontend:
+The executable is at `native/target/release/sonic-native.exe`. Windows is the verified build target. macOS and Linux still need runtime verification.
 
-```bash
-NODE_ENV=production node server.js
-```
-
-Open http://localhost:4000 — the server serves the built app.
-
-## Desktop tray app (macOS / Windows)
-
-Runs the server and shows an icon in the **menu bar** (Mac) or **system tray** (Windows). Click to open the app in your browser. Options: Open in Browser, Run at startup, Quit.
-
-- **Dev:** build once, then run Electron:
-  ```bash
-  npm run electron:dev
-  ```
-- **Package installers:**
-  - macOS (DMG): `npm run package:mac`
-  - Windows (NSIS installer): `npm run package:win`
-  - Both: `npm run package`
-
-Output is in the `dist/` folder (electron-builder output, not Vite’s dist).
-
-## Features
-
-- **Music:** Browse Plex libraries, play albums/tracks, queue, shuffle, repeat.
-- **Playlists:** Create playlists, add songs/albums (from Music or Queue), drag to reorder, rename, set a cover image. Stored in `data/playlists.json`.
-- **Now Playing / Queue / Settings:** Theme, streaming quality, cache reset.
-
-## Push to GitHub
-
-The repo is ready to push: `.gitignore` excludes `node_modules/`, `dist/`, and `data/`. Run `npm run build` and the tray app scripts on your machine; no need to commit build artifacts.
+The [previous Electron client](https://github.com/blinkywink/sonic-player/tree/80a1ecb) is available in Git history.

@@ -1,10 +1,5 @@
-node_modules
-dist
-release-app
-data
+/native/target/
+/data/
 *.log
-*.dmg
-*.exe
-*.app
-*.zip
 .DS_Store
+/node_modules/

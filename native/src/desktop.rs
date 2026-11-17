@@ -1,0 +1,275 @@
+use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+use slint::ComponentHandle;
+use std::{
+    io,
+    mem::size_of,
+    os::windows::ffi::OsStrExt,
+    ptr::{null, null_mut},
+};
+use windows_sys::{
+    Win32::{
+        Foundation::*,
+        System::{Registry::*, Threading::*},
+        UI::{Shell::*, WindowsAndMessaging::*},
+    },
+    core::w,
+};
+
+const TRAY_MESSAGE: u32 = WM_APP + 1;
+const RUN: *const u16 = w!("Software\\Microsoft\\Windows\\CurrentVersion\\Run");
+const APP: *const u16 = w!("SonicNative");
+
+pub struct Instance(HANDLE);
+
+impl Instance {
+    pub fn acquire() -> io::Result<Option<Self>> {
+        // An auto-reset event handles both instance ownership and requests to show the window.
+        unsafe {
+            let event = CreateEventW(null(), 0, 0, w!("Local\\SonicNative-ShowWindow-v1"));
+            if event.is_null() {
+                return Err(io::Error::last_os_error());
+            }
+            if GetLastError() == ERROR_ALREADY_EXISTS {
+                let success = SetEvent(event);
+                let error = io::Error::last_os_error();
+                CloseHandle(event);
+                return if success == 0 { Err(error) } else { Ok(None) };
+            }
+            Ok(Some(Self(event)))
+        }
+    }
+
+    pub fn activate_if_requested(&self, tray: &Tray) {
+        unsafe {
+            if WaitForSingleObject(self.0, 0) == WAIT_OBJECT_0 {
+                show(tray.data.hWnd);
+            }
+        }
+    }
+}
+
+impl Drop for Instance {
+    fn drop(&mut self) {
+        unsafe {
+            CloseHandle(self.0);
+        }
+    }
+}
+
+pub struct Tray {
+    data: NOTIFYICONDATAW,
+    custom_icon: bool,
+}
+
+impl Tray {
+    pub fn attach(ui: &crate::Sonic) -> Option<Self> {
+        let handle = ui.window().window_handle();
+        let RawWindowHandle::Win32(handle) = handle.window_handle().ok()?.as_raw() else {
+            return None;
+        };
+        let hwnd = handle.hwnd.get() as HWND;
+        let mut data = NOTIFYICONDATAW {
+            cbSize: size_of::<NOTIFYICONDATAW>() as u32,
+            hWnd: hwnd,
+            uID: 1,
+            uFlags: NIF_ICON | NIF_MESSAGE | NIF_TIP,
+            uCallbackMessage: TRAY_MESSAGE,
+            ..Default::default()
+        };
+        for (to, from) in data.szTip.iter_mut().zip("Sonic".encode_utf16()) {
+            *to = from;
+        }
+        unsafe {
+            let icon = include_bytes!("../assets/icon.ico");
+            let custom = ico_image(icon)
+                .map(|bytes| {
+                    CreateIconFromResourceEx(
+                        bytes.as_ptr(),
+                        bytes.len() as u32,
+                        1,
+                        0x0003_0000,
+                        32,
+                        32,
+                        LR_DEFAULTCOLOR,
+                    )
+                })
+                .unwrap_or(null_mut());
+            let custom_icon = !custom.is_null();
+            data.hIcon = if custom_icon {
+                custom
+            } else {
+                LoadIconW(null_mut(), IDI_APPLICATION)
+            };
+            if Shell_NotifyIconW(NIM_ADD, &data) == 0 {
+                if custom_icon {
+                    DestroyIcon(data.hIcon);
+                }
+                return None;
+            }
+            if SetWindowSubclass(hwnd, Some(window_proc), 1, 0) == 0 {
+                Shell_NotifyIconW(NIM_DELETE, &data);
+                if custom_icon {
+                    DestroyIcon(data.hIcon);
+                }
+                return None;
+            }
+            Some(Self { data, custom_icon })
+        }
+    }
+}
+
+impl Drop for Tray {
+    fn drop(&mut self) {
+        unsafe {
+            RemoveWindowSubclass(self.data.hWnd, Some(window_proc), 1);
+            Shell_NotifyIconW(NIM_DELETE, &self.data);
+            if self.custom_icon {
+                DestroyIcon(self.data.hIcon);
+            }
+        }
+    }
+}
+
+unsafe fn show(hwnd: HWND) {
+    unsafe {
+        ShowWindow(
+            hwnd,
+            if IsIconic(hwnd) != 0 {
+                SW_RESTORE
+            } else {
+                SW_SHOW
+            },
+        );
+        SetForegroundWindow(hwnd);
+    }
+}
+
+unsafe extern "system" fn window_proc(
+    hwnd: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    _: usize,
+    _: usize,
+) -> LRESULT {
+    unsafe {
+        if message == WM_CLOSE {
+            ShowWindow(hwnd, SW_HIDE);
+            return 0;
+        }
+        if message == TRAY_MESSAGE {
+            match lparam as u32 {
+                WM_LBUTTONUP => show(hwnd),
+                WM_RBUTTONUP => {
+                    let menu = CreatePopupMenu();
+                    if menu.is_null() {
+                        return 0;
+                    }
+                    let startup = startup_enabled();
+                    AppendMenuW(menu, MF_STRING, 1, w!("Open Sonic"));
+                    AppendMenuW(
+                        menu,
+                        MF_STRING | if startup { MF_CHECKED } else { MF_UNCHECKED },
+                        2,
+                        w!("Run at startup"),
+                    );
+                    AppendMenuW(menu, MF_SEPARATOR, 0, null());
+                    AppendMenuW(menu, MF_STRING, 3, w!("Quit"));
+                    let mut cursor = POINT::default();
+                    GetCursorPos(&mut cursor);
+                    SetForegroundWindow(hwnd);
+                    let command = TrackPopupMenu(
+                        menu,
+                        TPM_RETURNCMD | TPM_RIGHTBUTTON,
+                        cursor.x,
+                        cursor.y,
+                        0,
+                        hwnd,
+                        null(),
+                    );
+                    DestroyMenu(menu);
+                    PostMessageW(hwnd, WM_NULL, 0, 0);
+                    match command {
+                        1 => show(hwnd),
+                        2 => {
+                            if let Err(error) = set_startup(!startup) {
+                                let message: Vec<u16> =
+                                    format!("Could not update startup: {error}")
+                                        .encode_utf16()
+                                        .chain([0])
+                                        .collect();
+                                MessageBoxW(hwnd, message.as_ptr(), w!("Sonic"), MB_ICONERROR);
+                            }
+                        }
+                        3 => {
+                            let _ = slint::quit_event_loop();
+                        }
+                        _ => {}
+                    }
+                }
+                _ => {}
+            }
+            return 0;
+        }
+        DefSubclassProc(hwnd, message, wparam, lparam)
+    }
+}
+
+unsafe fn startup_enabled() -> bool {
+    let mut size = 0;
+    unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            RUN,
+            APP,
+            RRF_RT_REG_SZ,
+            null_mut(),
+            null_mut(),
+            &mut size,
+        ) == ERROR_SUCCESS
+    }
+}
+
+unsafe fn set_startup(enabled: bool) -> io::Result<()> {
+    let result = if enabled {
+        let exe = std::env::current_exe()?;
+        let command: Vec<u16> = [b'"' as u16]
+            .into_iter()
+            .chain(exe.as_os_str().encode_wide())
+            .chain([b'"' as u16, 0])
+            .collect();
+        unsafe {
+            RegSetKeyValueW(
+                HKEY_CURRENT_USER,
+                RUN,
+                APP,
+                REG_SZ,
+                command.as_ptr().cast(),
+                (command.len() * 2) as u32,
+            )
+        }
+    } else {
+        unsafe { RegDeleteKeyValueW(HKEY_CURRENT_USER, RUN, APP) }
+    };
+    if result == ERROR_SUCCESS || (!enabled && result == ERROR_FILE_NOT_FOUND) {
+        Ok(())
+    } else {
+        Err(io::Error::from_raw_os_error(result as i32))
+    }
+}
+
+fn ico_image(file: &[u8]) -> Option<&[u8]> {
+    let count = u16::from_le_bytes(file.get(4..6)?.try_into().ok()?) as usize;
+    let directory = file.get(6..6 + count * 16)?;
+    let entry = directory.chunks_exact(16).min_by_key(|entry| {
+        let width = if entry[0] == 0 {
+            256
+        } else {
+            i32::from(entry[0])
+        };
+        (width - 32).abs()
+    })?;
+    let size = u32::from_le_bytes(entry[8..12].try_into().ok()?) as usize;
+    let offset = u32::from_le_bytes(entry[12..16].try_into().ok()?) as usize;
+    file.get(offset..offset.checked_add(size)?)
+}
