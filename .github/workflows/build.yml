@@ -23,6 +23,6 @@ jobs:
         run: cargo build --release --locked --manifest-path native/Cargo.toml
       - uses: actions/upload-artifact@v4
         with:
-          name: sonic-windows-x64
-          path: native/target/release/sonic-native.exe
+          name: sonicplayer-windows-x64
+          path: native/target/release/sonicplayer.exe
           if-no-files-found: error

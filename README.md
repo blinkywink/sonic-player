@@ -6,7 +6,7 @@ A native Plex and local music player built with Rust, Slint, and Rodio. Browse a
 
 ## Run on Windows
 
-Open a successful [Windows build](https://github.com/blinkywink/sonic-player/actions/workflows/build.yml) and download the `sonic-windows-x64` artifact. Extract it and run `sonic-native.exe`.
+Open a successful [Windows build](https://github.com/blinkywink/sonic-player/actions/workflows/build.yml) and download the `sonicplayer-windows-x64` artifact. Extract it and run `sonicplayer.exe`.
 
 - **Plex:** Open **Settings → Library → Sign in with Plex**, approve Sonic in your browser, then return to the app.
 - **Local music:** Enable local files in **Settings → Library**, put music in the `SonicMusic` folder, and refresh. You can also pass audio file paths when launching Sonic.
@@ -23,6 +23,6 @@ cargo build --release --locked --manifest-path native/Cargo.toml
 cargo test --release --locked --manifest-path native/Cargo.toml
 ```
 
-The executable is at `native/target/release/sonic-native.exe`. Windows is the verified build target. macOS and Linux still need runtime verification.
+The executable is at `native/target/release/sonicplayer.exe`. Windows is the verified build target. macOS and Linux still need runtime verification.
 
 The [previous Electron client](https://github.com/blinkywink/sonic-player/tree/80a1ecb) is available in Git history.
