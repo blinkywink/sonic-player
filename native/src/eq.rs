@@ -56,6 +56,8 @@ pub struct Settings {
     preamp: AtomicU32,
     revision: AtomicU64,
     compressor: AtomicBool,
+    /// RMS level of the playing audio in four bands (low → high), for the visualizer.
+    levels: [AtomicU32; 4],
 }
 
 impl Settings {
@@ -65,6 +67,10 @@ impl Settings {
 
     pub fn set_preamp(&self, preamp: f32) {
         self.preamp.store(preamp.to_bits(), Ordering::Relaxed);
+    }
+
+    pub fn levels(&self) -> [f32; 4] {
+        self.levels.each_ref().map(|level| f32::from_bits(level.load(Ordering::Relaxed)))
     }
 
     pub fn update(&self, gains: &[f32; 20], preamp: f32) {
@@ -132,6 +138,52 @@ pub struct Equalizer<S> {
     reduction: f32,
     attack: f32,
     release: f32,
+    meter: Meter,
+}
+
+/// Splits the output into four bands with one-pole low-passes and accumulates their energy.
+#[derive(Default)]
+struct Meter {
+    coefficients: [f32; 3],
+    lows: [f32; 3],
+    energy: [f32; 4],
+    frames: u32,
+    window: u32,
+}
+
+impl Meter {
+    const CUTOFFS: [f32; 3] = [180.0, 900.0, 3500.0];
+
+    fn reset(&mut self, rate: u32) {
+        *self = Self {
+            coefficients: Self::CUTOFFS.map(|cutoff| 1.0 - (-TAU * cutoff / rate.max(1) as f32).exp()),
+            window: (rate / 40).max(1),
+            ..Self::default()
+        };
+    }
+
+    fn push(&mut self, sample: f32, levels: &[AtomicU32; 4]) {
+        for (low, coefficient) in self.lows.iter_mut().zip(self.coefficients) {
+            *low += (sample - *low) * coefficient;
+        }
+        let bands = [
+            self.lows[0],
+            self.lows[1] - self.lows[0],
+            self.lows[2] - self.lows[1],
+            sample - self.lows[2],
+        ];
+        for (energy, band) in self.energy.iter_mut().zip(bands) {
+            *energy += band * band;
+        }
+        self.frames += 1;
+        if self.frames >= self.window {
+            for (level, energy) in levels.iter().zip(&mut self.energy) {
+                level.store((*energy / self.frames as f32).sqrt().to_bits(), Ordering::Relaxed);
+                *energy = 0.0;
+            }
+            self.frames = 0;
+        }
+    }
 }
 
 impl<S: Source> Equalizer<S> {
@@ -152,6 +204,7 @@ impl<S: Source> Equalizer<S> {
             reduction: 0.0,
             attack: 0.0,
             release: 0.0,
+            meter: Meter::default(),
         }
     }
 
@@ -169,6 +222,7 @@ impl<S: Source> Equalizer<S> {
         self.rate = rate;
         self.attack = 1.0 - (-1.0 / (rate as f32 * 0.003)).exp();
         self.release = 1.0 - (-1.0 / (rate as f32 * 0.250)).exp();
+        self.meter.reset(rate);
         self.channel = 0;
         self.delays.resize(channels, [Delay::default(); 20]);
         for (index, filter) in self.filters.iter_mut().enumerate() {
@@ -226,7 +280,12 @@ impl<S: Source> Iterator for Equalizer<S> {
             }
         }
         // Apply the user gain after normalization so compression can't undo it.
-        Some(sample * self.preamp)
+        let output = sample * self.preamp;
+        if self.channel == 0 {
+            // Meter one channel per frame; enough for a visual level.
+            self.meter.push(output, &self.settings.levels);
+        }
+        Some(output)
     }
 }
 

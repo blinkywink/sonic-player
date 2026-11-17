@@ -8,6 +8,7 @@ mod eq;
 mod lastfm;
 mod library;
 mod local;
+mod lyrics;
 mod media;
 mod plex;
 mod stream;
@@ -62,6 +63,7 @@ enum Event {
     Audio(u64, Result<Audio>),
     SeekFinished(u64, Option<String>),
     Prefetched(u64, Result<Audio>),
+    Lyrics(String, Option<Vec<lyrics::Line>>),
 }
 
 struct Prefetch {
@@ -88,6 +90,12 @@ struct Player {
 }
 
 struct State {
+    /// Rating key of the track whose lyrics are shown, its lines and the highlighted row.
+    lyrics_key: String,
+    lyrics: Vec<lyrics::Line>,
+    lyrics_cache: HashMap<String, Option<Vec<lyrics::Line>>>,
+    lyrics_chars: usize,
+    lyric_index: i32,
     plex: Option<Plex>,
     data: LibraryData,
     equalizer: Arc<eq::Settings>,
@@ -489,6 +497,7 @@ impl State {
             eq_preamp: self.eq_preamp,
             eq_preset: ui.get_eq_preset_index(),
             normalizer: ui.get_normalizer_enabled(),
+            online_lyrics: ui.get_online_lyrics(),
             font: ui.get_font_index(),
             discord_id: ui.get_discord_id().trim().to_owned(),
             discord_image: ui.get_discord_image().trim().to_owned(),
@@ -520,6 +529,62 @@ impl State {
         self.original_order.clone_from(&saved.original_order);
         self.publish_queue(ui);
         self.present_queued_track(ui);
+    }
+
+    /// Follows the current track: fetches its lyrics once and keeps the sung line highlighted.
+    fn sync_lyrics(&mut self, ui: &Sonic, tx: &Sender<Event>) {
+        let track = self.queue.get(self.current);
+        let key = track.map(|t| t.rating_key.clone()).unwrap_or_default();
+        if key != self.lyrics_key {
+            self.lyrics_key.clone_from(&key);
+            if self.lyrics_cache.contains_key(&key) || key.is_empty() {
+                self.present_lyrics(ui);
+            } else if let Some(track) = track.cloned() {
+                self.lyrics.clear();
+                ui.set_lyrics(ModelRc::default());
+                ui.set_lyrics_status("Looking for lyrics…".into());
+                let (tx, online) = (tx.clone(), ui.get_online_lyrics());
+                thread::spawn(move || {
+                    let _ = tx.send(Event::Lyrics(track.rating_key.clone(), lyrics::find(&track, online)));
+                });
+            }
+        }
+        if ui.get_lyrics_synced() {
+            let index = lyrics::current(&self.lyrics, ui.get_position());
+            if index != self.lyric_index {
+                self.lyric_index = index;
+                ui.set_lyric_index(index);
+            }
+        }
+    }
+
+    fn present_lyrics(&mut self, ui: &Sonic) {
+        let found = self.lyrics_cache.get(&self.lyrics_key).cloned().flatten();
+        self.lyrics = found.unwrap_or_default();
+        let synced = self.lyrics.first().is_some_and(|line| line.time.is_some());
+        let slots = lyrics::layout(&self.lyrics, self.lyrics_chars);
+        ui.set_lyrics(ModelRc::new(VecModel::from(
+            self.lyrics
+                .iter()
+                .zip(slots)
+                .map(|(line, (y, height))| LyricLine {
+                    text: line.text.as_str().into(),
+                    time: line.time.unwrap_or(-1.0),
+                    y,
+                    height,
+                })
+                .collect::<Vec<_>>(),
+        )));
+        ui.set_lyrics_synced(synced);
+        self.lyric_index = -1;
+        ui.set_lyric_index(-1);
+        ui.set_lyrics_status(if self.lyrics_key.is_empty() || !self.lyrics.is_empty() {
+            "".into()
+        } else if ui.get_online_lyrics() {
+            "No lyrics found for this track.".into()
+        } else {
+            "No lyrics found. Online lookup is off in Settings.".into()
+        });
     }
 
     fn present_queued_track(&self, ui: &Sonic) {
@@ -1409,6 +1474,12 @@ impl State {
                     self.missing_art.insert(key);
                 }
             }
+            Event::Lyrics(key, lines) => {
+                self.lyrics_cache.insert(key.clone(), lines);
+                if key == self.lyrics_key {
+                    self.present_lyrics(ui);
+                }
+            }
             Event::PlayingArt(generation, pixels) if generation == self.generation => {
                 if let Some(pixels) = pixels {
                     self.art_theme = sampled_theme(&pixels);
@@ -1660,12 +1731,12 @@ const QUEUE_PAGE: QueueLayout = QueueLayout {
     flatten_repeats: true,
 };
 
-/// Matches the original sidebar mini queue: 44px header + 6px, 40px rows 4px apart,
-/// 48px single rows, 10px between groups.
+/// Sidebar mini queue: a little tighter than the original (40px header + 4px,
+/// 32px rows 2px apart, 44px single rows, 10px between groups).
 const QUEUE_SIDEBAR: QueueLayout = QueueLayout {
-    header: (44, 6),
-    grouped_row: (40, 4),
-    single_row: (48, 10),
+    header: (40, 4),
+    grouped_row: (32, 2),
+    single_row: (44, 10),
     group_gap: 10,
     flatten_repeats: false,
 };
@@ -2003,6 +2074,7 @@ fn main() -> Result<()> {
     ui.set_text_mode(preferences.text_mode.clamp(0, 2));
     ui.set_font_index(preferences.font.clamp(0, 5));
     ui.set_normalizer_enabled(preferences.normalizer);
+    ui.set_online_lyrics(preferences.online_lyrics);
     ui.set_eq_preset_index(preferences.eq_preset.clamp(0, 6));
     ui.set_discord_id(preferences.discord_id.as_str().into());
     ui.set_discord_image(preferences.discord_image.as_str().into());
@@ -2033,6 +2105,11 @@ fn main() -> Result<()> {
     ui.set_album_rows(ModelRc::from(album_rows.clone()));
     ui.set_albums(ModelRc::from(model.clone()));
     let state = Rc::new(RefCell::new(State {
+        lyrics_key: String::new(),
+        lyrics: Vec::new(),
+        lyrics_cache: HashMap::new(),
+        lyrics_chars: 34,
+        lyric_index: -1,
         plex: None,
         data,
         equalizer: Arc::new(eq::Settings::default()),
@@ -3015,6 +3092,30 @@ fn main() -> Result<()> {
             });
         }
     });
+    ui.on_lyrics_layout({
+        let (state, weak) = (state.clone(), ui.as_weak());
+        move |chars| {
+            let Some(ui) = weak.upgrade() else { return };
+            let Ok(mut state) = state.try_borrow_mut() else { return };
+            let chars = chars.max(8) as usize;
+            if chars != state.lyrics_chars {
+                state.lyrics_chars = chars;
+                state.present_lyrics(&ui);
+            }
+        }
+    });
+    ui.on_toggle_online_lyrics({
+        let (state, weak) = (state.clone(), ui.as_weak());
+        move || {
+            let Some(ui) = weak.upgrade() else { return };
+            ui.set_online_lyrics(!ui.get_online_lyrics());
+            let mut state = state.borrow_mut();
+            // Let tracks without lyrics be looked up again with the new setting.
+            state.lyrics_cache.retain(|_, lines| lines.is_some());
+            state.lyrics_key.clear();
+            state.save(&ui, "Lyrics setting saved");
+        }
+    });
     ui.on_toggle_normalizer({
         let (state, weak) = (state.clone(), ui.as_weak());
         move || {
@@ -3196,6 +3297,35 @@ fn main() -> Result<()> {
             let _ = tx.send(event);
         });
     }
+    // Visualizer: each band is scaled against its own recent peak so quiet and loud
+    // tracks both move the bars; bars rise immediately and fall back smoothly.
+    let viz_timer = Timer::default();
+    {
+        const FLOORS: [f32; 4] = [0.02, 0.012, 0.006, 0.003];
+        let levels = Rc::new(VecModel::from(vec![0.0f32; 4]));
+        ui.set_viz_levels(ModelRc::from(levels.clone()));
+        let (state, weak) = (state.clone(), ui.as_weak());
+        let mut peaks = FLOORS;
+        let mut shown = [0.0f32; 4];
+        viz_timer.start(TimerMode::Repeated, Duration::from_millis(50), move || {
+            let Some(ui) = weak.upgrade() else { return };
+            if !ui.get_playing() {
+                return;
+            }
+            let Ok(state) = state.try_borrow() else { return };
+            let raw = state.equalizer.levels();
+            for band in 0..4 {
+                peaks[band] = (peaks[band] * 0.996).max(raw[band]).max(FLOORS[band]);
+                let target = (raw[band] / peaks[band]).sqrt().clamp(0.0, 1.0);
+                shown[band] = if target > shown[band] {
+                    target
+                } else {
+                    shown[band] * 0.55 + target * 0.45
+                };
+                levels.set_row_data(band, shown[band]);
+            }
+        });
+    }
     let exit_state = state.clone();
     let startup_tx = tx.clone();
     let timer = Timer::default();
@@ -3253,6 +3383,7 @@ fn main() -> Result<()> {
                 ui.set_elapsed(clock(seconds as u64).into());
             }
         }
+        state.sync_lyrics(&ui, &tx);
         let presence = (
             ui.get_discord_id().trim().to_owned(),
             ui.get_discord_image().trim().to_owned(),

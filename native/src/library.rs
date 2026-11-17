@@ -36,6 +36,8 @@ pub struct Preferences {
     pub discord_image: String,
     pub streaming_local: i32,
     pub streaming_remote: i32,
+    /// Look up lyrics on LRCLIB when a track has none of its own.
+    pub online_lyrics: bool,
 }
 
 impl Default for Preferences {
@@ -62,6 +64,7 @@ impl Default for Preferences {
             discord_image: String::new(),
             streaming_local: 2,
             streaming_remote: 2,
+            online_lyrics: true,
         }
     }
 }
