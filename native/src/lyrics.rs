@@ -41,17 +41,44 @@ pub fn parse(source: &str) -> Vec<Line> {
         }
     }
     if synced.is_empty() {
-        // Trim blank lines at both ends of plain lyrics.
-        while plain.first().is_some_and(|l| l.text.is_empty()) {
-            plain.remove(0);
-        }
-        while plain.last().is_some_and(|l| l.text.is_empty()) {
-            plain.pop();
-        }
+        // Blank lines in plain lyrics only separate verses; spacing handles that.
+        plain.retain(|line| !line.text.is_empty());
         return plain;
     }
     synced.sort_by(|a, b| a.time.unwrap_or(0.0).total_cmp(&b.time.unwrap_or(0.0)));
-    synced
+    music_breaks(synced)
+}
+
+/// Seconds of instrumental that earn a music-break marker.
+const BREAK: f32 = 4.0;
+
+/// Keeps empty timed lines only where the music plays on for a while (they become
+/// music markers, with empty text) and adds one for a long intro; short spacers go.
+fn music_breaks(lines: Vec<Line>) -> Vec<Line> {
+    let first_sung = lines.iter().find(|l| !l.text.is_empty()).and_then(|l| l.time);
+    let mut out = Vec::with_capacity(lines.len() + 1);
+    if first_sung.is_some_and(|t| t >= BREAK + 1.0) {
+        out.push(Line { time: Some(0.0), text: String::new() });
+    }
+    for (index, line) in lines.iter().enumerate() {
+        if line.text.is_empty() {
+            let start = line.time.unwrap_or(0.0);
+            let next = lines[index + 1..]
+                .iter()
+                .find(|l| !l.text.is_empty())
+                .and_then(|l| l.time);
+            let long = next.is_none_or(|next| next - start >= BREAK);
+            let before_singing = first_sung.is_none_or(|t| start < t);
+            if !long || before_singing || out.last().is_some_and(|l: &Line| l.text.is_empty()) {
+                continue;
+            }
+        }
+        out.push(line.clone());
+    }
+    if out.iter().all(|l| l.text.is_empty()) {
+        out.clear();
+    }
+    out
 }
 
 /// Removes enhanced-LRC word timings such as `<00:19.53>` and tidies spacing.
@@ -196,8 +223,8 @@ pub fn layout(lines: &[Line], chars: usize) -> Vec<(f32, f32)> {
         .iter()
         .map(|line| {
             let rows = if line.text.is_empty() { 0 } else { wrapped_rows(&line.text, chars) };
-            // Blank lines in lyrics are pauses between verses: keep a short gap.
-            let height = if rows == 0 { ROW * 0.6 } else { rows as f32 * ROW };
+            // Empty lines are music-break markers.
+            let height = if rows == 0 { ROW } else { rows as f32 * ROW };
             let slot = (y, height);
             y += height + GAP;
             slot
@@ -239,15 +266,29 @@ mod tests {
     #[test]
     fn strips_enhanced_word_timings() {
         let lines = parse("[00:18.89]<00:18.89>We're <00:19.25>no <00:19.53>strangers <00:20.07>to <00:20.33>love");
-        assert_eq!(lines[0].text, "We're no strangers to love");
-        assert_eq!(lines[0].time, Some(18.89));
+        // Singing starts at 18.9 s, so a music marker covers the intro.
+        assert_eq!((lines[0].time, lines[0].text.as_str()), (Some(0.0), ""));
+        assert_eq!(lines[1].text, "We're no strangers to love");
+        assert_eq!(lines[1].time, Some(18.89));
         assert_eq!(parse("[00:01]a <b> c")[0].text, "a <b> c");
+    }
+
+    #[test]
+    fn music_breaks_become_markers_and_spacers_are_dropped() {
+        let lines = parse("[00:08]First\n[00:10]\n[00:11]Second\n[00:20]\n[00:30]Third");
+        let texts: Vec<_> = lines.iter().map(|l| (l.time.unwrap(), l.text.as_str())).collect();
+        // Long intro gets a marker at 0, the 1 s spacer goes, the 10 s break stays.
+        assert_eq!(texts, [(0.0, ""), (8.0, "First"), (11.0, "Second"), (20.0, ""), (30.0, "Third")]);
+        assert_eq!(current(&lines, 2.0), 0);
+        assert_eq!(current(&lines, 25.0), 3);
+        // A short intro gets no marker.
+        assert_eq!(parse("[00:02]Hi\n[00:05]There")[0].text, "Hi");
     }
 
     #[test]
     fn plain_text_is_unsynced() {
         let lines = parse("\nFirst line\n\nSecond line\n");
-        assert_eq!(lines.len(), 3);
+        assert_eq!(lines.len(), 2);
         assert!(lines.iter().all(|l| l.time.is_none()));
         assert_eq!(current(&lines, 3.0), -1);
     }

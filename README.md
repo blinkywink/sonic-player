@@ -4,6 +4,16 @@
 
 A native Plex and local music player built with Rust, Slint, and Rodio. Browse albums, manage your queue and playlists, tune the equalizer, and connect Discord Rich Presence or Last.fm.
 
+## Features
+
+- **Library:** Plex and local files in one album grid with search, sorting and grouping. Click an album to see its songs in the sidebar, double-click to play, right-click for Add to queue, Shuffle play or Add to playlist.
+- **Queue:** grouped by album, drag to reorder, and Clear queue keeps the current song playing.
+- **Playlists:** create, rename, reorder and remove tracks, add a custom cover, or let Sonic tile the first four albums as the cover.
+- **Now Playing:** full-window cover with synced lyrics that follow the song and can be clicked to jump. Lyrics come from a `.lrc` file next to a local track, lyrics embedded in the file, or [LRCLIB](https://lrclib.net). The online lookup sends only the title, artist, album and length, and can be turned off in **Settings → Playback**.
+- **Playback:** gapless playback, a 20-band EQ with loudness normalization and preamp, live level bars on the playing track, and pop-free seeking.
+- **Windows media controls:** media keys and the system media flyout (with cover art) work as soon as a track is loaded.
+- **Look:** themes from a chosen color or from the playing album's art, kept dark and subtle.
+
 ## Run on Windows
 
 Open a successful [Windows build](https://github.com/blinkywink/sonic-player/actions/workflows/build.yml) and download the `sonicplayer-windows-x64` artifact. Extract it and run `sonicplayer.exe`.

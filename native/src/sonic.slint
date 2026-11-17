@@ -230,9 +230,27 @@ component PlayerRange inherits Rectangle {
     in property <bool> smooth;
     callback committed(float);
     property <float> preview;
-    // Eases between position updates so playback progress moves continuously.
-    property <float> shown: root.value;
-    animate shown { duration: root.smooth ? 160ms : 0ms; easing: linear; }
+    // Eases between position updates so playback progress moves continuously,
+    // but jumps (seeks, new tracks) snap instead of sliding across the bar.
+    property <float> shown;
+    property <bool> jump: true;
+    // Where the user just seeked to, shown until playback reports that position.
+    property <float> pending: -1;
+    property <float> display: hit.pressed ? root.preview : root.pending >= 0 ? root.pending : root.shown;
+    init => { root.shown = root.value; }
+    changed value => {
+        if root.pending >= 0 && abs(root.value - root.pending) < max(1.5, root.maximum * 0.01) {
+            root.pending = -1;
+        }
+        root.jump = !root.smooth || abs(root.value - root.shown) > 1;
+        root.shown = root.value;
+    }
+    animate shown { duration: root.jump ? 0ms : 160ms; easing: linear; }
+    Timer { interval: 1500ms; running: root.pending >= 0; triggered => { root.pending = -1; } }
+    function commit(target: float) {
+        if !root.updates-live { root.pending = target; }
+        root.committed(target);
+    }
     height: 20px;
     accessible-role: slider;
     accessible-label: label;
@@ -240,11 +258,11 @@ component PlayerRange inherits Rectangle {
     track := Rectangle {
         x: 0px; y: (parent.height - self.height) / 2;
         width: parent.width; height: root.show-knob ? 6px : 4px; border-radius: 2px; background: root.show-knob ? Palette.text.with-alpha(0.18) : Palette.text.with-alpha(0.14);
-        if !root.show-knob: Rectangle { x: 0px; y: 0px; height: parent.height; width: min(parent.width, max(0px, parent.width * (hit.pressed ? root.preview : root.shown) / max(0.01, root.maximum))); border-radius: 2px; background: Palette.text; }
+        if !root.show-knob: Rectangle { x: 0px; y: 0px; height: parent.height; width: min(parent.width, max(0px, parent.width * root.display / max(0.01, root.maximum))); border-radius: 2px; background: Palette.text; }
     }
     if root.show-knob: Rectangle {
         width: 14px; height: 14px; border-radius: 7px;
-        x: (parent.width - self.width) * clamp((hit.pressed ? root.preview : root.shown) / root.maximum, 0, 1);
+        x: (parent.width - self.width) * clamp(root.display / root.maximum, 0, 1);
         y: (parent.height - self.height) / 2;
         background: Palette.text; border-width: 1px; border-color: Palette.background.with-alpha(0.5);
         drop-shadow-color: #00000040; drop-shadow-blur: 4px; drop-shadow-offset-y: 1px;
@@ -264,7 +282,7 @@ component PlayerRange inherits Rectangle {
                 if root.updates-live { root.committed(root.preview); }
             }
             if event.kind == PointerEventKind.up {
-                root.committed(clamp(self.mouse-x / root.width, 0, 1) * root.maximum);
+                root.commit(clamp(self.mouse-x / root.width, 0, 1) * root.maximum);
             }
         }
     }
@@ -272,11 +290,11 @@ component PlayerRange inherits Rectangle {
         focus-on-click: false;
         key-pressed(event) => {
             if event.text == Key.LeftArrow {
-                root.committed(max(0, root.value - root.maximum * 0.05));
+                root.commit(max(0, root.value - root.maximum * 0.05));
                 return accept;
             }
             if event.text == Key.RightArrow {
-                root.committed(min(root.maximum, root.value + root.maximum * 0.05));
+                root.commit(min(root.maximum, root.value + root.maximum * 0.05));
                 return accept;
             }
             return reject;
@@ -403,9 +421,20 @@ component LyricRow inherits Rectangle {
     in property <LyricLine> line;
     in property <int> state;
     in property <float> fade: 1;
+    in property <float> pulse;
     callback jump;
     opacity: root.fade;
-    Text {
+    if root.line.text == "": Image {
+        property <length> size: 30px + (root.state == 0 ? 8px * root.pulse : 0px);
+        x: 0px; y: (parent.height - self.height) / 2;
+        width: self.size; height: self.size;
+        source: @image-url("icons/music.svg");
+        colorize: root.state == 0 ? Palette.text : Palette.muted;
+        opacity: root.state == 0 ? 1 : root.state < 0 ? 0.45 : 0.65;
+        animate width, height { duration: 90ms; easing: ease-out; }
+        animate colorize, opacity { duration: 220ms; }
+    }
+    if root.line.text != "": Text {
         width: parent.width; height: parent.height;
         text: root.line.text; wrap: word-wrap; vertical-alignment: top;
         font-size: 34px; font-weight: 700;
@@ -1144,6 +1173,7 @@ export component Sonic inherits Window {
                             y: line.y * 1px; height: line.height * 1px; width: lyrics-panel.width;
                             line: line; state: index == root.lyric-index ? 0 : index < root.lyric-index ? -1 : 1;
                             fade: lyrics-panel.fade(synced.y + (line.y + line.height / 2) * 1px);
+                            pulse: root.viz-levels.length > 0 ? root.viz-levels[0] : 0;
                             jump => { if line.time >= 0 { root.seek(line.time); } }
                         }
                     }
@@ -1785,7 +1815,7 @@ export component Sonic inherits Window {
         }
             footer := Rectangle {
                 height: 91px;
-                background: Palette.background;
+                background: root.page == 1 ? transparent : Palette.background;
                 // The player floats as a rounded glass bar above the page edge.
                 Rectangle {
                     x: 12px; y: 4px; width: parent.width - 24px; height: parent.height - 14px;
@@ -1793,6 +1823,8 @@ export component Sonic inherits Window {
                     background: Palette.glass-sheen;
                     border-width: 1px; border-color: Palette.hairline;
                     drop-shadow-color: #00000040; drop-shadow-blur: 30px; drop-shadow-offset-y: 8px;
+                    opacity: root.page == 1 ? 0 : 1;
+                    animate opacity { duration: 300ms; easing: ease-out; }
                 }
                 property <bool> show-meta: self.width >= 720px;
                 property <bool> show-time: self.width >= 600px;

@@ -90,6 +90,10 @@ struct Player {
 }
 
 struct State {
+    /// Page shown on the previous tick, to refresh views when the user arrives on them.
+    last_page: i32,
+    /// Playlist cover mosaics, keyed by the album art keys they were built from.
+    mosaics: RefCell<HashMap<Vec<String>, Image>>,
     theme_fade: ThemeFade,
     /// Rating key of the track whose lyrics are shown, its lines and the highlighted row.
     lyrics_key: String,
@@ -418,20 +422,25 @@ impl State {
             .map(|list| list.name.as_str().into())
             .collect::<Vec<_>>();
         ui.set_playlists(ModelRc::new(VecModel::from(names)));
-        ui.set_playlist_cards(ModelRc::new(VecModel::from(
-            self.data
-                .playlists
-                .iter()
-                .map(|playlist| PlaylistCard {
+        let cards = self
+            .data
+            .playlists
+            .iter()
+            .map(|playlist| {
+                let artwork = if playlist.cover.is_empty() {
+                    self.playlist_mosaic(playlist)
+                } else {
+                    decode_cover(&playlist.cover).map(Image::from_rgba8)
+                };
+                PlaylistCard {
                     name: playlist.name.as_str().into(),
                     count: playlist.items.len() as i32,
-                    artwork: decode_cover(&playlist.cover)
-                        .map(Image::from_rgba8)
-                        .unwrap_or_default(),
-                    has_art: !playlist.cover.is_empty(),
-                })
-                .collect::<Vec<_>>(),
-        )));
+                    has_art: artwork.is_some(),
+                    artwork: artwork.unwrap_or_default(),
+                }
+            })
+            .collect::<Vec<_>>();
+        ui.set_playlist_cards(ModelRc::new(VecModel::from(cards)));
 
         let last = self.data.playlists.len() as i32 - 1;
         let target = if ui.get_playlist_target() < 0 && last >= 0 {
@@ -443,16 +452,46 @@ impl State {
         self.select_playlist(ui, ui.get_playlist_current().min(last));
     }
 
+    /// Up to four tracks from different albums, in playlist order, for its cover mosaic.
+    fn mosaic_sources(playlist: &Playlist) -> Vec<&Entry> {
+        let mut seen = HashSet::new();
+        playlist
+            .items
+            .iter()
+            .filter(|track| seen.insert(track_art_key(track)))
+            .take(4)
+            .collect()
+    }
+
+    /// A 2x2 cover built from the playlist's albums once their art has loaded.
+    fn playlist_mosaic(&self, playlist: &Playlist) -> Option<Image> {
+        let keys: Vec<String> = Self::mosaic_sources(playlist).into_iter().map(track_art_key).collect();
+        if keys.is_empty() {
+            return None;
+        }
+        if let Some(image) = self.mosaics.borrow().get(&keys) {
+            return Some(image.clone());
+        }
+        let covers: Vec<&Image> = keys.iter().filter_map(|key| self.artwork.get(key)).collect();
+        if covers.len() < keys.len() {
+            return None;
+        }
+        let image = mosaic(&covers)?;
+        self.mosaics.borrow_mut().insert(keys, image.clone());
+        Some(image)
+    }
+
     fn select_playlist(&self, ui: &Sonic, row: i32) {
         ui.set_playlist_current(row);
         if let Some(list) = self.data.playlists.get(row as usize) {
             ui.set_playlist_name(list.name.as_str().into());
-            ui.set_playlist_cover(
-                decode_cover(&list.cover)
-                    .map(Image::from_rgba8)
-                    .unwrap_or_default(),
-            );
-            ui.set_playlist_has_art(!list.cover.is_empty());
+            let cover = if list.cover.is_empty() {
+                self.playlist_mosaic(list)
+            } else {
+                decode_cover(&list.cover).map(Image::from_rgba8)
+            };
+            ui.set_playlist_has_art(cover.is_some());
+            ui.set_playlist_cover(cover.unwrap_or_default());
             ui.set_playlist_items(ModelRc::new(VecModel::from(
                 list.items
                     .iter()
@@ -828,6 +867,9 @@ impl State {
             self.track_art_changed = false;
             if ui.get_page() == 3 && ui.get_playlist_current() >= 0 {
                 self.select_playlist(ui, ui.get_playlist_current());
+            } else if ui.get_page() == 3 {
+                // New album art may complete a playlist's cover mosaic.
+                self.publish_playlists(ui);
             }
             if !self.queue.is_empty() {
                 self.publish_queue(ui);
@@ -838,21 +880,34 @@ impl State {
         if self.pending_art.len() >= 4 || !(matches!(ui.get_page(), 2 | 3) || sidebar_queue) {
             return;
         }
-        let tracks = if ui.get_page() != 3 || ui.get_playlist_current() < 0 {
-            self.queue.get(self.current..).unwrap_or_default()
-        } else if let Some(playlist) = self.data.playlists.get(ui.get_playlist_current() as usize) {
-            if playlist
+        let reachable = |playlist: &Playlist| {
+            !playlist
                 .server_id
                 .as_ref()
                 .is_some_and(|id| !self.plex.as_ref().is_some_and(|p| p.server_id == *id))
-            {
+        };
+        let tracks: Vec<Entry> = if ui.get_page() == 3 && ui.get_playlist_current() < 0 {
+            // Playlists grid: art for each playlist's cover mosaic, then the mini queue.
+            self.data
+                .playlists
+                .iter()
+                .filter(|playlist| playlist.cover.is_empty() && reachable(playlist))
+                .flat_map(Self::mosaic_sources)
+                .chain(self.queue.get(self.current..).unwrap_or_default())
+                .take(50)
+                .cloned()
+                .collect()
+        } else if ui.get_page() != 3 {
+            self.queue.get(self.current..).unwrap_or_default().iter().take(50).cloned().collect()
+        } else if let Some(playlist) = self.data.playlists.get(ui.get_playlist_current() as usize) {
+            if !reachable(playlist) {
                 return;
             }
-            &playlist.items
+            playlist.items.iter().take(50).cloned().collect()
         } else {
             return;
         };
-        for track in tracks.iter().take(50) {
+        for track in &tracks {
             if self.pending_art.len() >= 4 {
                 break;
             }
@@ -1967,6 +2022,45 @@ fn apply_palette(ui: &Sonic, colors: PaletteColors) {
     palette.set_accent_ink(accent_ink);
 }
 
+/// Tiles up to four covers 2x2 (1 cover is used as is; 2 or 3 repeat to fill the grid).
+fn mosaic(covers: &[&Image]) -> Option<Image> {
+    const TILE: u32 = 240;
+    let tiles: Vec<image::RgbaImage> = covers
+        .iter()
+        .filter_map(|cover| {
+            let pixels = cover.to_rgba8()?;
+            let source = image::RgbaImage::from_raw(pixels.width(), pixels.height(), pixels.as_bytes().to_vec())?;
+            // Center-crop to a square, then scale to one tile.
+            let side = source.width().min(source.height());
+            let square = image::imageops::crop_imm(
+                &source,
+                (source.width() - side) / 2,
+                (source.height() - side) / 2,
+                side,
+                side,
+            )
+            .to_image();
+            Some(image::imageops::resize(&square, TILE, TILE, image::imageops::FilterType::Triangle))
+        })
+        .collect();
+    if tiles.len() == 1 {
+        return Some(covers[0].clone());
+    }
+    let order: [usize; 4] = match tiles.len() {
+        2 => [0, 1, 1, 0],
+        3 => [0, 1, 2, 0],
+        4 => [0, 1, 2, 3],
+        _ => return None,
+    };
+    let mut canvas = image::RgbaImage::new(TILE * 2, TILE * 2);
+    for (slot, &tile) in order.iter().enumerate() {
+        let (x, y) = ((slot as u32 % 2) * TILE, (slot as u32 / 2) * TILE);
+        image::imageops::replace(&mut canvas, &tiles[tile], i64::from(x), i64::from(y));
+    }
+    let buffer = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(canvas.as_raw(), canvas.width(), canvas.height());
+    Some(Image::from_rgba8(buffer))
+}
+
 fn color(rgb: [u8; 3]) -> slint::Color {
     slint::Color::from_rgb_u8(rgb[0], rgb[1], rgb[2])
 }
@@ -2241,6 +2335,8 @@ fn main() -> Result<()> {
     ui.set_album_rows(ModelRc::from(album_rows.clone()));
     ui.set_albums(ModelRc::from(model.clone()));
     let state = Rc::new(RefCell::new(State {
+        last_page: -1,
+        mosaics: RefCell::new(HashMap::new()),
         theme_fade: ThemeFade::default(),
         lyrics_key: String::new(),
         lyrics: Vec::new(),
@@ -2463,11 +2559,11 @@ fn main() -> Result<()> {
                 }
                 y = next;
             }
-            for row in visible {
+            for index in visible.into_iter().map(|row| state.visible[row]).collect::<Vec<_>>() {
                 if state.pending_art.len() >= 4 {
                     break;
                 }
-                let album = &state.albums[state.visible[row]];
+                let album = &state.albums[index];
                 if (album.thumb.is_empty() && album.local_path.is_none())
                     || state.artwork.contains_key(&album.rating_key)
                     || state.missing_art.contains(&album.rating_key)
@@ -3524,6 +3620,13 @@ fn main() -> Result<()> {
             }
         }
         state.sync_lyrics(&ui, &tx);
+        if ui.get_page() != state.last_page {
+            state.last_page = ui.get_page();
+            if state.last_page == 3 && ui.get_playlist_current() < 0 {
+                // Covers for playlist mosaics may already be cached.
+                state.publish_playlists(&ui);
+            }
+        }
         let presence = (
             ui.get_discord_id().trim().to_owned(),
             ui.get_discord_image().trim().to_owned(),
