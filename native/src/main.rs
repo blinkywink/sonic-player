@@ -95,6 +95,8 @@ struct State {
     lyrics_key: String,
     lyrics: Vec<lyrics::Line>,
     lyrics_cache: HashMap<String, Option<Vec<lyrics::Line>>>,
+    /// Lookups in flight, so the current and the preloaded next track are fetched once.
+    lyrics_pending: HashSet<String>,
     lyrics_chars: usize,
     lyric_index: i32,
     plex: Option<Plex>,
@@ -543,12 +545,33 @@ impl State {
                 self.lyrics.clear();
                 ui.set_lyrics(ModelRc::default());
                 ui.set_lyrics_status("Looking for lyrics…".into());
-                let (tx, online) = (tx.clone(), ui.get_online_lyrics());
-                thread::spawn(move || {
-                    let _ = tx.send(Event::Lyrics(track.rating_key.clone(), lyrics::find(&track, online)));
-                });
+                ui.set_lyrics_loading(true);
+                self.fetch_lyrics(ui, tx, track);
             }
         }
+        // Preload the next track's lyrics so they're ready the moment it starts.
+        if !self.lyrics_pending.is_empty() {
+            return self.highlight_lyric(ui);
+        }
+        if let Some(next) = self.queue.get(self.current + 1).cloned()
+            && !self.lyrics_cache.contains_key(&next.rating_key)
+        {
+            self.fetch_lyrics(ui, tx, next);
+        }
+        self.highlight_lyric(ui);
+    }
+
+    fn fetch_lyrics(&mut self, ui: &Sonic, tx: &Sender<Event>, track: Entry) {
+        if !self.lyrics_pending.insert(track.rating_key.clone()) {
+            return;
+        }
+        let (tx, online) = (tx.clone(), ui.get_online_lyrics());
+        thread::spawn(move || {
+            let _ = tx.send(Event::Lyrics(track.rating_key.clone(), lyrics::find(&track, online)));
+        });
+    }
+
+    fn highlight_lyric(&mut self, ui: &Sonic) {
         if ui.get_lyrics_synced() {
             let index = lyrics::current(&self.lyrics, ui.get_position());
             if index != self.lyric_index {
@@ -576,6 +599,7 @@ impl State {
                 .collect::<Vec<_>>(),
         )));
         ui.set_lyrics_synced(synced);
+        ui.set_lyrics_loading(false);
         self.lyric_index = -1;
         ui.set_lyric_index(-1);
         ui.set_lyrics_status(if self.lyrics_key.is_empty() || !self.lyrics.is_empty() {
@@ -1506,6 +1530,7 @@ impl State {
                 }
             }
             Event::Lyrics(key, lines) => {
+                self.lyrics_pending.remove(&key);
                 self.lyrics_cache.insert(key.clone(), lines);
                 if key == self.lyrics_key {
                     self.present_lyrics(ui);
@@ -1608,8 +1633,15 @@ impl State {
         let sink = player.sink.clone();
         let tx = tx.clone();
         let generation = self.generation;
+        let equalizer = self.equalizer.clone();
         thread::spawn(move || {
+            // Fade out briefly first so the jump doesn't pop; the EQ fades back in after.
+            equalizer.begin_seek();
+            if !sink.is_paused() {
+                thread::sleep(Duration::from_millis(20));
+            }
             let error = sink.try_seek(position).err().map(|error| error.to_string());
+            equalizer.end_seek();
             let _ = tx.send(Event::SeekFinished(generation, error));
         });
     }
@@ -2191,6 +2223,7 @@ fn main() -> Result<()> {
         lyrics_key: String::new(),
         lyrics: Vec::new(),
         lyrics_cache: HashMap::new(),
+        lyrics_pending: HashSet::new(),
         lyrics_chars: 34,
         lyric_index: -1,
         plex: None,

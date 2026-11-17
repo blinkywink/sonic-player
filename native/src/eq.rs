@@ -58,6 +58,8 @@ pub struct Settings {
     compressor: AtomicBool,
     /// RMS level of the playing audio in four bands (low → high), for the visualizer.
     levels: [AtomicU32; 4],
+    /// Set while a seek is about to happen: output fades to silence so the jump doesn't click.
+    seeking: AtomicBool,
 }
 
 impl Settings {
@@ -67,6 +69,15 @@ impl Settings {
 
     pub fn set_preamp(&self, preamp: f32) {
         self.preamp.store(preamp.to_bits(), Ordering::Relaxed);
+    }
+
+    /// Fade the output out ahead of a seek; call [`Settings::end_seek`] once it has happened.
+    pub fn begin_seek(&self) {
+        self.seeking.store(true, Ordering::Relaxed);
+    }
+
+    pub fn end_seek(&self) {
+        self.seeking.store(false, Ordering::Relaxed);
     }
 
     pub fn levels(&self) -> [f32; 4] {
@@ -139,6 +150,9 @@ pub struct Equalizer<S> {
     attack: f32,
     release: f32,
     meter: Meter,
+    /// Output gain for seek fades (0 = silent, 1 = normal) and its per-frame step.
+    fade: f32,
+    fade_step: f32,
 }
 
 /// Splits the output into four bands with one-pole low-passes and accumulates their energy.
@@ -205,6 +219,8 @@ impl<S: Source> Equalizer<S> {
             attack: 0.0,
             release: 0.0,
             meter: Meter::default(),
+            fade: 1.0,
+            fade_step: 1.0,
         }
     }
 
@@ -223,6 +239,8 @@ impl<S: Source> Equalizer<S> {
         self.attack = 1.0 - (-1.0 / (rate as f32 * 0.003)).exp();
         self.release = 1.0 - (-1.0 / (rate as f32 * 0.250)).exp();
         self.meter.reset(rate);
+        // About 12 ms to fade fully out or back in.
+        self.fade_step = 1.0 / (rate.max(1) as f32 * 0.012);
         self.channel = 0;
         self.delays.resize(channels, [Delay::default(); 20]);
         for (index, filter) in self.filters.iter_mut().enumerate() {
@@ -280,8 +298,10 @@ impl<S: Source> Iterator for Equalizer<S> {
             }
         }
         // Apply the user gain after normalization so compression can't undo it.
-        let output = sample * self.preamp;
+        let output = sample * self.preamp * self.fade;
         if self.channel == 0 {
+            let target = if self.settings.seeking.load(Ordering::Relaxed) { 0.0 } else { 1.0 };
+            self.fade += (target - self.fade).clamp(-self.fade_step, self.fade_step);
             // Meter one channel per frame; enough for a visual level.
             self.meter.push(output, &self.settings.levels);
         }
@@ -304,6 +324,8 @@ impl<S: Source> Source for Equalizer<S> {
     }
     fn try_seek(&mut self, position: Duration) -> Result<(), SeekError> {
         self.inner.try_seek(position)?;
+        // Start the new position from silence and fade back in.
+        self.fade = 0.0;
         self.delays.fill([Delay::default(); 20]);
         self.channel = 0;
         self.remaining = 0;
@@ -326,6 +348,25 @@ mod tests {
             Equalizer::new(source, Arc::default()).collect::<Vec<_>>(),
             signal
         );
+    }
+
+    #[test]
+    fn seek_fades_out_and_back_in_without_a_jump() {
+        let settings = Arc::new(Settings::default());
+        let source = SamplesBuffer::new(1, 48_000, vec![0.5; 48_000]);
+        let mut playing = Equalizer::new(source, settings.clone());
+        assert!((playing.nth(10).unwrap() - 0.5).abs() < 1e-6);
+        settings.begin_seek();
+        let faded: Vec<f32> = playing.by_ref().take(1_000).collect();
+        // Monotonic fade with small steps, reaching silence within ~12 ms.
+        assert!(faded.windows(2).all(|pair| pair[1] <= pair[0] && pair[0] - pair[1] < 0.01));
+        assert_eq!(*faded.last().unwrap(), 0.0);
+        playing.try_seek(Duration::from_millis(100)).unwrap();
+        settings.end_seek();
+        let resumed: Vec<f32> = playing.by_ref().take(1_000).collect();
+        assert!(resumed[0] < 0.01);
+        assert!(resumed.windows(2).all(|pair| pair[1] >= pair[0] && pair[1] - pair[0] < 0.01));
+        assert!((resumed.last().unwrap() - 0.5).abs() < 1e-6);
     }
 
     #[test]
