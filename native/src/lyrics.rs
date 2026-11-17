@@ -187,8 +187,9 @@ fn lrclib(track: &Entry) -> Option<Vec<Line>> {
 /// Lays out lines for the lyrics panel by estimating word wrap at `chars` per row.
 /// Returns (y, height) in logical pixels for each line.
 pub fn layout(lines: &[Line], chars: usize) -> Vec<(f32, f32)> {
-    const ROW: f32 = 30.0;
-    const GAP: f32 = 14.0;
+    // Matches the 34px bold lyric text in the Now Playing view.
+    const ROW: f32 = 44.0;
+    const GAP: f32 = 18.0;
     let chars = chars.max(8);
     let mut y = 0.0;
     lines
@@ -255,8 +256,8 @@ mod tests {
     fn layout_wraps_long_lines() {
         let lines = parse("[00:01]short\n[00:02]a much longer line that needs to wrap here");
         let slots = layout(&lines, 20);
-        assert_eq!(slots[0], (0.0, 30.0));
-        assert_eq!(slots[1].1, 90.0);
-        assert_eq!(slots[1].0, 44.0);
+        assert_eq!(slots[0], (0.0, 44.0));
+        assert_eq!(slots[1].1, 132.0);
+        assert_eq!(slots[1].0, 62.0);
     }
 }

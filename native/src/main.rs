@@ -90,6 +90,7 @@ struct Player {
 }
 
 struct State {
+    theme_fade: ThemeFade,
     /// Rating key of the track whose lyrics are shown, its lines and the highlighted row.
     lyrics_key: String,
     lyrics: Vec<lyrics::Line>,
@@ -391,7 +392,6 @@ impl State {
 
     fn present_tracks(&mut self, ui: &Sonic, tracks: Vec<Entry>) {
         ui.set_tracks(track_model(&tracks));
-        ui.set_album_details(tracks.first().map(Entry::details).unwrap_or_default().into());
         self.tracks = tracks;
     }
 
@@ -704,18 +704,49 @@ impl State {
         };
         let theme = theme_colors(bg, ui.get_text_mode());
         ui.set_theme_swatch(color(seed));
-        let palette = ui.global::<Palette>();
-        palette.set_background(color(bg));
-        palette.set_panel(color(theme.surface));
-        palette.set_surface(color(theme.surface));
-        palette.set_border(color(theme.border));
-        palette.set_hover(color(theme.hover));
-        palette.set_selected(color(theme.selected));
-        palette.set_text(color(theme.text));
-        palette.set_muted(color(theme.muted));
-        palette.set_accent(color(theme.accent));
-        palette.set_accent_text(color(theme.accent_text));
-        palette.set_accent_ink(color(theme.accent_ink));
+        let target = [
+            bg,
+            theme.surface,
+            theme.border,
+            theme.hover,
+            theme.selected,
+            theme.text,
+            theme.muted,
+            theme.accent,
+            theme.accent_text,
+            theme.accent_ink,
+        ];
+        let fade = &self.theme_fade;
+        let Some(from) = fade.displayed.get() else {
+            apply_palette(ui, target);
+            fade.displayed.set(Some(target));
+            return;
+        };
+        if from == target {
+            return;
+        }
+        // Blend from whatever is on screen (even mid-fade) to the new colors.
+        let (weak, displayed, timer) = (ui.as_weak(), fade.displayed.clone(), Rc::downgrade(&fade.timer));
+        let start = Instant::now();
+        fade.timer.start(TimerMode::Repeated, Duration::from_millis(16), move || {
+            let t = (start.elapsed().as_secs_f32() / 0.45).min(1.0);
+            let eased = 1.0 - (1.0 - t).powi(3);
+            let mix: PaletteColors = std::array::from_fn(|row| {
+                std::array::from_fn(|channel| {
+                    let (a, b) = (f32::from(from[row][channel]), f32::from(target[row][channel]));
+                    (a + (b - a) * eased).round() as u8
+                })
+            });
+            if let Some(ui) = weak.upgrade() {
+                apply_palette(&ui, mix);
+            }
+            displayed.set(Some(mix));
+            if t >= 1.0
+                && let Some(timer) = timer.upgrade()
+            {
+                timer.stop();
+            }
+        });
     }
 
     fn use_tracks(
@@ -1865,6 +1896,32 @@ fn parse_theme(value: &str) -> Option<[u8; 3]> {
     }
 }
 
+/// Background, surface, border, hover, selected, text, muted, accent, accent text, accent ink.
+type PaletteColors = [[u8; 3]; 10];
+
+#[derive(Default)]
+struct ThemeFade {
+    timer: Rc<Timer>,
+    displayed: Rc<std::cell::Cell<Option<PaletteColors>>>,
+}
+
+fn apply_palette(ui: &Sonic, colors: PaletteColors) {
+    let [bg, surface, border, hover, selected, text, muted, accent, accent_text, accent_ink] =
+        colors.map(color);
+    let palette = ui.global::<Palette>();
+    palette.set_background(bg);
+    palette.set_panel(surface);
+    palette.set_surface(surface);
+    palette.set_border(border);
+    palette.set_hover(hover);
+    palette.set_selected(selected);
+    palette.set_text(text);
+    palette.set_muted(muted);
+    palette.set_accent(accent);
+    palette.set_accent_text(accent_text);
+    palette.set_accent_ink(accent_ink);
+}
+
 fn color(rgb: [u8; 3]) -> slint::Color {
     slint::Color::from_rgb_u8(rgb[0], rgb[1], rgb[2])
 }
@@ -2041,15 +2098,40 @@ fn sampled_theme(image: &Art) -> Option<[u8; 3]> {
         bucket[2] += u32::from(g);
         bucket[3] += u32::from(b);
     }
+    let average = |bucket: &[u32; 4]| -> [u8; 3] {
+        let count = bucket[0].max(1);
+        std::array::from_fn(|channel| ((bucket[channel + 1] + count / 2) / count) as u8)
+    };
     // Equal counts keep the first bucket, matching the original numeric key order.
-    let best = buckets.iter().rev().max_by_key(|bucket| bucket[0])?;
-    let count = best[0];
-    if count == 0 {
+    let dominant = buckets.iter().rev().max_by_key(|bucket| bucket[0])?;
+    if dominant[0] == 0 {
         return None;
     }
-    Some(std::array::from_fn(|channel| {
-        ((best[channel + 1] + count / 2) / count) as u8
-    }))
+    // Prefer the most striking color that still covers a real part of the cover:
+    // weight each color by how much of the art it fills and by its vividness,
+    // skipping near-black and near-white pixels that read as grey.
+    let total: u32 = buckets.iter().map(|bucket| bucket[0]).sum();
+    let vivid = buckets
+        .iter()
+        .filter(|bucket| bucket[0] * 200 >= total)
+        .map(|bucket| {
+            let color = average(bucket);
+            let max = color.iter().copied().max().unwrap_or(0);
+            let min = color.iter().copied().min().unwrap_or(0);
+            let chroma = f64::from(max - min) / 255.0;
+            let usable = max > 40 && min < 225;
+            let score = if usable { f64::from(bucket[0]).sqrt() * chroma.powi(2) } else { 0.0 };
+            (score, chroma, color)
+        })
+        .max_by(|a, b| a.0.total_cmp(&b.0));
+    let [hue, saturation, lightness] = match vivid {
+        Some((_, chroma, color)) if chroma >= 0.22 => to_hsl(color),
+        // Black-and-white or muted art: keep its dominant tone.
+        _ => return Some(average(dominant)),
+    };
+    // Use a toned-down version of that color so the whole UI isn't jarring:
+    // softer saturation and a deeper, even lightness.
+    Some(from_hsl(hue, (saturation * 0.6).clamp(0.28, 0.5), lightness.clamp(0.2, 0.34)))
 }
 
 fn clock(seconds: u64) -> String {
@@ -2105,6 +2187,7 @@ fn main() -> Result<()> {
     ui.set_album_rows(ModelRc::from(album_rows.clone()));
     ui.set_albums(ModelRc::from(model.clone()));
     let state = Rc::new(RefCell::new(State {
+        theme_fade: ThemeFade::default(),
         lyrics_key: String::new(),
         lyrics: Vec::new(),
         lyrics_cache: HashMap::new(),
@@ -2227,7 +2310,6 @@ fn main() -> Result<()> {
             ui.set_album_year("".into());
             ui.set_album_artist("".into());
             ui.set_tracks(ModelRc::default());
-            ui.set_album_details("".into());
         }
     });
     ui.on_select_album({
@@ -2254,7 +2336,6 @@ fn main() -> Result<()> {
                 return;
             }
             ui.set_tracks(ModelRc::default());
-            ui.set_album_details("".into());
             state.fetch_tracks(key.as_str(), &tx);
         }
     });
