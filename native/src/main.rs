@@ -2075,7 +2075,7 @@ fn theme_colors(bg: [u8; 3], text_mode: i32) -> ThemeColors {
     // accent (selected and active states) is only a gentle step away from it.
     let step = |amount: f64| if lightness > 0.55 { -amount } else { amount };
     let original_surface = from_hsl(hue, saturation, (lightness + step(0.06)).clamp(0.06, 0.94));
-    let border = from_hsl(hue, saturation, (lightness + step(0.10)).clamp(0.10, 0.90));
+    let border = from_hsl(hue, saturation, (lightness + step(0.08)).clamp(0.10, 0.90));
     let accent = from_hsl(
         hue,
         (saturation + 0.06).min(0.60),
@@ -2105,7 +2105,12 @@ fn theme_colors(bg: [u8; 3], text_mode: i32) -> ThemeColors {
     };
     let surface = readable_surface(original_surface);
     let hover = readable_surface(border);
-    let selected = readable_surface(mix(surface, accent, 0.35));
+    // Selected rows and buttons: the same hue as the surfaces, just a small step brighter.
+    let selected = readable_surface(from_hsl(
+        hue,
+        saturation,
+        (lightness + step(0.10)).clamp(0.10, 0.90),
+    ));
     let backgrounds = [bg, surface, hover, selected];
     let muted = if text_mode == 0 {
         contrast_color(muted_base, text, &backgrounds, 4.5)
