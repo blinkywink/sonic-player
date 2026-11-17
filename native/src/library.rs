@@ -76,6 +76,9 @@ pub struct PlaybackSnapshot {
     pub server_id: Option<String>,
     #[serde(default)]
     pub original_order: Vec<String>,
+    /// Seconds into the current track when the session was saved.
+    #[serde(default)]
+    pub position: f32,
 }
 
 #[derive(Default, Deserialize, Serialize)]

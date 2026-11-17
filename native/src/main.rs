@@ -90,6 +90,8 @@ struct Player {
 }
 
 struct State {
+    /// Track and position restored from the last session; used once, on its first play.
+    resume: Option<(String, f32)>,
     /// Page shown on the previous tick, to refresh views when the user arrives on them.
     last_page: i32,
     /// Playlist cover mosaics, keyed by the album art keys they were built from.
@@ -564,12 +566,21 @@ impl State {
         {
             return;
         }
+        let saved_position = saved.position;
         self.playback_restored = true;
         self.current = saved.current.min(saved.queue.len() - 1);
         self.queue.clone_from(&saved.queue);
         self.original_order.clone_from(&saved.original_order);
         self.publish_queue(ui);
         self.present_queued_track(ui);
+        if let Some(track) = self.queue.get(self.current)
+            && saved_position > 1.0
+            && saved_position < track.duration as f32 / 1000.0 - 1.0
+        {
+            self.resume = Some((track.rating_key.clone(), saved_position));
+            ui.set_position(saved_position);
+            ui.set_elapsed(clock(saved_position as u64).into());
+        }
     }
 
     /// Follows the current track: fetches its lyrics once and keeps the sung line highlighted.
@@ -680,7 +691,7 @@ impl State {
         }
     }
 
-    fn flush_session(&mut self, ui: &Sonic) -> Result<()> {
+    fn flush_session(&mut self, ui: &Sonic, exact: bool) -> Result<()> {
         if !self.can_save {
             return Ok(());
         }
@@ -701,11 +712,20 @@ impl State {
             } else {
                 None
             };
+            // Not started since reopening: keep the saved position.
+            let started = self.player.as_ref().is_some_and(|player| !player.sink.empty());
+            let position = match &self.resume {
+                Some((_, position)) if !started => *position,
+                _ if exact => ui.get_position(),
+                // Rounded while running so the file isn't rewritten every couple of seconds.
+                _ => (ui.get_position() / 5.0).floor() * 5.0,
+            };
             Some(PlaybackSnapshot {
                 queue: self.queue.clone(),
                 current: self.current,
                 server_id,
                 original_order: self.original_order.clone(),
+                position,
             })
         };
         if self.data.playback != playback || previous != self.data.preferences {
@@ -1651,6 +1671,11 @@ impl State {
     }
 
     fn audio_started(&mut self, ui: &Sonic, tx: &Sender<Event>, duration: Option<Duration>) {
+        if let Some((key, position)) = self.resume.take()
+            && self.queue.get(self.current).is_some_and(|track| track.rating_key == key)
+        {
+            self.seek(tx, Duration::from_secs_f32(position));
+        }
         let track = &mut self.queue[self.current];
         if track.duration == 0
             && let Some(duration) = duration
@@ -2336,6 +2361,7 @@ fn main() -> Result<()> {
     ui.set_albums(ModelRc::from(model.clone()));
     let state = Rc::new(RefCell::new(State {
         last_page: -1,
+        resume: None,
         mosaics: RefCell::new(HashMap::new()),
         theme_fade: ThemeFade::default(),
         lyrics_key: String::new(),
@@ -3582,7 +3608,7 @@ fn main() -> Result<()> {
         let now = Instant::now();
         if now.duration_since(state.last_save) >= Duration::from_secs(2) {
             state.last_save = now;
-            if let Err(error) = state.flush_session(&ui) {
+            if let Err(error) = state.flush_session(&ui, false) {
                 ui.set_status(format!("Could not save the session: {error}").into());
             }
         }
@@ -3671,7 +3697,7 @@ fn main() -> Result<()> {
         ui.set_page(2);
     }
     ui.run()?;
-    exit_state.borrow_mut().flush_session(&ui)?;
+    exit_state.borrow_mut().flush_session(&ui, true)?;
     Ok(())
 }
 
