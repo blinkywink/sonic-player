@@ -611,6 +611,19 @@ impl State {
         });
     }
 
+    /// Keeps the current track (playing or paused) and removes everything else.
+    fn clear_up_next(&mut self, ui: &Sonic) {
+        let track = self.queue[self.current].clone();
+        if !self.original_order.is_empty() {
+            self.original_order = vec![track.rating_key.clone()];
+        }
+        self.queue = vec![track];
+        self.current = 0;
+        // publish_queue also cancels a preloaded hand-off to the removed next track.
+        self.publish_queue(ui);
+        ui.set_status("Up next cleared".into());
+    }
+
     fn present_queued_track(&self, ui: &Sonic) {
         if let Some(track) = self.queue.get(self.current) {
             ui.set_track_key(track.rating_key.as_str().into());
@@ -2058,12 +2071,15 @@ fn theme_colors(bg: [u8; 3], text_mode: i32) -> ThemeColors {
     const LIGHT_TEXT: [u8; 3] = [232, 238, 244];
     const DARK_TEXT: [u8; 3] = [26, 34, 52];
     let [hue, saturation, lightness] = to_hsl(bg);
-    let original_surface = from_hsl(hue, saturation, (lightness + 0.10).clamp(0.08, 0.92));
-    let border = from_hsl(hue, saturation, (lightness + 0.16).clamp(0.12, 0.88));
+    // A narrow, subtle range: surfaces and borders sit close to the page, and the
+    // accent (selected and active states) is only a gentle step away from it.
+    let step = |amount: f64| if lightness > 0.55 { -amount } else { amount };
+    let original_surface = from_hsl(hue, saturation, (lightness + step(0.06)).clamp(0.06, 0.94));
+    let border = from_hsl(hue, saturation, (lightness + step(0.10)).clamp(0.10, 0.90));
     let accent = from_hsl(
         hue,
-        (saturation + 0.15).min(0.80),
-        (lightness + 0.28).clamp(0.25, 0.85),
+        (saturation + 0.06).min(0.60),
+        (lightness + step(0.15)).clamp(0.16, 0.84),
     );
     let light = match text_mode {
         1 => true,
@@ -2089,7 +2105,7 @@ fn theme_colors(bg: [u8; 3], text_mode: i32) -> ThemeColors {
     };
     let surface = readable_surface(original_surface);
     let hover = readable_surface(border);
-    let selected = readable_surface(mix(surface, accent, 0.28));
+    let selected = readable_surface(mix(surface, accent, 0.35));
     let backgrounds = [bg, surface, hover, selected];
     let muted = if text_mode == 0 {
         contrast_color(muted_base, text, &backgrounds, 4.5)
@@ -2156,14 +2172,15 @@ fn sampled_theme(image: &Art) -> Option<[u8; 3]> {
             (score, chroma, color)
         })
         .max_by(|a, b| a.0.total_cmp(&b.0));
-    let [hue, saturation, lightness] = match vivid {
-        Some((_, chroma, color)) if chroma >= 0.22 => to_hsl(color),
+    let (vivid, [hue, saturation, lightness]) = match vivid {
+        Some((_, chroma, color)) if chroma >= 0.22 => (true, to_hsl(color)),
         // Black-and-white or muted art: keep its dominant tone.
-        _ => return Some(average(dominant)),
+        _ => (false, to_hsl(average(dominant))),
     };
-    // Use a toned-down version of that color so the whole UI isn't jarring:
-    // softer saturation and a deeper, even lightness.
-    Some(from_hsl(hue, (saturation * 0.6).clamp(0.28, 0.5), lightness.clamp(0.2, 0.34)))
+    // Album themes stay dark and subtle: a deep, softened version of the color,
+    // so every album lands in a similar, calm range.
+    let saturation = if vivid { (saturation * 0.5).clamp(0.22, 0.42) } else { saturation.min(0.3) };
+    Some(from_hsl(hue, saturation.min(0.4), lightness.clamp(0.09, 0.15)))
 }
 
 fn clock(seconds: u64) -> String {
@@ -2818,8 +2835,12 @@ fn main() -> Result<()> {
         move || {
             if let Some(ui) = weak.upgrade() {
                 let mut state = state.borrow_mut();
-                state.scrobble(&tx);
-                state.stop_and_clear(&ui);
+                if state.queue.get(state.current).is_some() {
+                    state.clear_up_next(&ui);
+                } else {
+                    state.scrobble(&tx);
+                    state.stop_and_clear(&ui);
+                }
             }
         }
     });
