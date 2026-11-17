@@ -83,8 +83,9 @@ component PlayerRange inherits Rectangle {
     accessible-label: label;
     accessible-value: value + "";
     track := Rectangle {
-        y: 7px; height: 6px; border-radius: 3px; background: Palette.border;
-        Rectangle { width: min(parent.width, max(0px, parent.width * (hit.pressed ? root.preview : root.value) / max(0.01, root.maximum))); border-radius: 3px; background: Palette.text; }
+        x: 0px; y: (parent.height - self.height) / 2;
+        width: parent.width; height: 6px; border-radius: 3px; background: Palette.border;
+        Rectangle { x: 0px; y: 0px; height: parent.height; width: min(parent.width, max(0px, parent.width * (hit.pressed ? root.preview : root.value) / max(0.01, root.maximum))); border-radius: 3px; background: Palette.text; }
     }
     hit := TouchArea {
         mouse-cursor: pointer;
@@ -1075,7 +1076,7 @@ export component Sonic inherits Window {
             footer := Rectangle {
                 height: 91px;
                 background: Palette.background;
-                Rectangle { height: 1px; background: Palette.border; }
+                Rectangle { x: 0px; y: 0px; width: parent.width; height: 1px; background: Palette.border; }
                 property <bool> show-meta: self.width >= 720px;
                 property <bool> show-time: self.width >= 580px;
                 property <bool> show-extra: self.width >= 540px;
@@ -1122,7 +1123,7 @@ export component Sonic inherits Window {
                     width: footer.show-volume ? 166px : 28px; height: 36px; x: parent.width - self.width - 16px; y: (parent.height - self.height) / 2;
                     spacing: 8px;
                     if footer.show-volume: IconButton { width: 26px; compact: true; label: root.volume-level == 0 ? "Unmute" : "Mute"; icon: root.volume-level == 0 ? @image-url("icons/mute.svg") : @image-url("icons/volume.svg"); clicked => { root.mute(); } }
-                    if footer.show-volume: PlayerRange { width: 96px; label: "Volume"; maximum: 100; value: root.volume-level; updates-live: true; committed(v) => { root.volume(v / 100); } }
+                    if footer.show-volume: PlayerRange { width: 96px; height: parent.height; label: "Volume"; maximum: 100; value: root.volume-level; updates-live: true; committed(v) => { root.volume(v / 100); } }
                     IconButton {
                         width: 28px; compact: true;
                         label: root.page == 1 ? "Exit fullscreen" : "Now Playing";
