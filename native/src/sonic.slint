@@ -1,4 +1,4 @@
-import { ComboBox, LineEdit, ListView, ScrollView, Slider } from "std-widgets.slint";
+import { ListView, ScrollView, Slider } from "std-widgets.slint";
 
 export struct Album { key: string, title: string, artist: string, year: string, art: image, }
 export struct AlbumRow { offset: int, count: int, heading: string, has-year: bool, }
@@ -18,12 +18,115 @@ export global Palette {
     in property <color> hover: #233452;
     in property <color> selected: #28477d;
     in property <color> accent: #264ba2;
+    in property <color> accent-text: #e8eef4;
+    in property <color> accent-ink: #9cbae8;
 }
 
 component Label inherits Text {
     color: Palette.text;
     vertical-alignment: center;
     overflow: elide;
+}
+
+component LineEdit inherits Rectangle {
+    in-out property <string> text <=> field.text;
+    in property <string> placeholder-text;
+    in property <color> field-color: Palette.background;
+    in property <InputType> input-type <=> field.input-type;
+    callback accepted;
+    callback edited(string);
+    forward-focus: field;
+    preferred-height: 38px;
+    min-height: 32px;
+    min-width: 80px;
+    horizontal-stretch: 1;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: field.has-focus ? Palette.accent-ink : Palette.border;
+    background: field-color;
+    clip: true;
+    accessible-role: text-input;
+    accessible-label: placeholder-text;
+    accessible-value: input-type == InputType.password ? "" : text;
+    accessible-placeholder-text: placeholder-text;
+    accessible-action-set-value(value) => { root.text = value; root.edited(value); }
+    Label {
+        x: 10px; width: parent.width - 20px; height: parent.height;
+        text: root.placeholder-text; color: Palette.muted;
+        visible: root.text == "";
+    }
+    field := TextInput {
+        accessible-role: none;
+        x: 10px; y: 0px; width: max(0px, parent.width - 20px); height: parent.height;
+        single-line: true;
+        vertical-alignment: center;
+        color: Palette.text;
+        selection-foreground-color: Palette.accent-text;
+        selection-background-color: Palette.accent;
+        accepted => { root.accepted(); }
+        edited => { root.edited(self.text); }
+    }
+}
+
+component ComboBox inherits Rectangle {
+    in property <[string]> model;
+    in property <color> field-color: Palette.background;
+    in-out property <int> current-index: 0;
+    callback selected;
+    preferred-height: 38px;
+    min-height: 32px;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: keyboard.has-focus ? Palette.accent-ink : Palette.border;
+    background: hit.has-hover ? Palette.hover : field-color;
+    accessible-role: combobox;
+    accessible-value: model[current-index];
+    accessible-action-default => { choices.show(); }
+    function select(index: int) {
+        if index >= 0 && index < model.length {
+            current-index = index;
+            selected();
+        }
+    }
+    Label { x: 10px; width: max(0px, parent.width - 34px); height: parent.height; text: root.model[root.current-index]; }
+    Label { x: parent.width - 22px; width: 14px; height: parent.height; text: "⌄"; horizontal-alignment: center; color: Palette.muted; }
+    hit := TouchArea { mouse-cursor: pointer; clicked => { keyboard.focus(); choices.show(); } }
+    keyboard := FocusScope {
+        focus-on-click: false;
+        key-pressed(event) => {
+            if event.text == Key.DownArrow { root.select(root.current-index + 1); return accept; }
+            if event.text == Key.UpArrow { root.select(root.current-index - 1); return accept; }
+            if event.text == Key.Return || event.text == " " { choices.show(); return accept; }
+            return reject;
+        }
+    }
+    choices := PopupWindow {
+        x: 0px; y: root.height + 3px;
+        width: root.width; height: root.model.length * 32px + 8px;
+        close-policy: close-on-click-outside;
+        forward-focus: menu-keys;
+        menu-keys := FocusScope {
+            key-pressed(event) => {
+                if event.text == Key.DownArrow { root.select(root.current-index + 1); return accept; }
+                if event.text == Key.UpArrow { root.select(root.current-index - 1); return accept; }
+                if event.text == Key.Return || event.text == Key.Escape { choices.close(); return accept; }
+                return reject;
+            }
+        }
+        Rectangle {
+            border-radius: 8px; border-width: 1px;
+            border-color: Palette.border; background: Palette.surface;
+            VerticalLayout {
+                padding: 4px;
+                for name[index] in root.model: Rectangle {
+                    height: 32px; border-radius: 5px;
+                    background: option.has-hover ? Palette.hover : index == root.current-index ? Palette.selected : transparent;
+                    Label { x: 6px; width: max(0px, parent.width - 12px); height: parent.height; text: name; }
+                    option := TouchArea { mouse-cursor: pointer; clicked => { root.select(index); choices.close(); } }
+                }
+            }
+        }
+    }
 }
 
 component Artwork inherits Image {
@@ -45,7 +148,7 @@ component Action inherits Rectangle {
     animate background { duration: 120ms; easing: ease-out; }
     border-width: 1px;
     border-color: Palette.border;
-    Label { text: root.label; horizontal-alignment: center; font-weight: 600; }
+    Label { text: root.label; color: root.active ? Palette.accent-text : Palette.text; horizontal-alignment: center; font-weight: 600; }
     hit := TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
 }
 
@@ -70,11 +173,11 @@ component IconButton inherits Rectangle {
         width: compact ? 18px : 16px;
         height: self.width;
         source: root.icon;
-        colorize: filled ? #0f172a : highlighted ? Palette.accent : compact || selected ? Palette.text : Palette.muted;
+        colorize: filled ? #0f172a : selected ? Palette.accent-text : highlighted ? Palette.accent-ink : compact ? Palette.text : Palette.muted;
     }
     if badge != "": Label {
         text: root.badge; font-weight: 700; font-size: 12px;
-        color: Palette.accent; horizontal-alignment: center;
+        color: root.selected ? Palette.accent-text : Palette.accent-ink; horizontal-alignment: center;
     }
     hit := TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
 }
@@ -536,8 +639,8 @@ export component Sonic inherits Window {
                 }
             if root.page == 0 && (root.connected || root.local-enabled): VerticalLayout {
                 horizontal-stretch: 1;
-                padding: 20px;
-                spacing: 12px;
+                padding: 24px; padding-bottom: 16px;
+                spacing: 16px;
                 library-controls := Rectangle {
                     min-width: 0px;
                     property <bool> stacked: self.width < (root.local-count > 0 ? 660px : 550px);
@@ -547,23 +650,23 @@ export component Sonic inherits Window {
                         width: library-controls.stacked ? parent.width : parent.width - sort-controls.width - 8px;
                         height: 38px; spacing: 8px;
                         LineEdit {
-                            min-width: 0px; horizontal-stretch: 1;
+                            min-width: 0px; max-width: 400px; horizontal-stretch: 1; field-color: Palette.surface;
                             placeholder-text: "Search songs and albums…";
                             edited(text) => { root.searching = text != ""; grid.content-y = 0px; root.search(text); }
                         }
-                        if root.local-count > 0: ComboBox { width: 110px; model: ["All music", "Local files"]; selected => { root.filter-local(self.current-index == 1); } }
+                        if root.local-count > 0: ComboBox { field-color: Palette.surface; width: 110px; model: ["All music", "Local files"]; selected => { root.filter-local(self.current-index == 1); } }
                         Action { width: 75px; label: "Refresh"; clicked => { root.refresh-library(); } }
                     }
                     sort-controls := HorizontalLayout {
                         x: library-controls.stacked ? 0px : parent.width - self.width;
                         y: library-controls.stacked ? 46px : 0px;
                         width: 315px; height: 38px; spacing: 8px;
-                        ComboBox {
+                        ComboBox { field-color: Palette.surface;
                             width: 137px;
                             model: ["Title (A–Z)", "Title (Z–A)", "Artist (A–Z)", "Artist (Z–A)", "Year (newest)", "Year (oldest)"];
                             selected => { grid.content-y = 0px; root.sort-albums(self.current-index); }
                         }
-                        ComboBox { width: 82px; model: ["None", "Artist", "Year"]; selected => { grid.content-y = 0px; root.group-albums(self.current-index); } }
+                        ComboBox { field-color: Palette.surface; width: 82px; model: ["None", "Artist", "Year"]; selected => { grid.content-y = 0px; root.group-albums(self.current-index); } }
                         Action { width: 36px; label: "▦"; active: !root.list-mode; clicked => { root.list-mode = false; grid.content-y = 0px; } }
                         Action { width: 36px; label: "≡"; active: root.list-mode; clicked => { root.list-mode = true; grid.content-y = 0px; } }
                     }
@@ -647,7 +750,7 @@ export component Sonic inherits Window {
                                 Rectangle {
                                     x: 0; y: 0; width: parent.width; height: parent.height;
                                     border-radius: 12px;
-                                    border-color: root.selected-key == album.key ? Palette.accent : transparent;
+                                    border-color: root.selected-key == album.key ? Palette.accent-ink : transparent;
                                     border-width: root.selected-key == album.key ? 3px : 1px;
                                     animate border-color { duration: 120ms; easing: ease-out; }
                                 }
@@ -762,8 +865,8 @@ export component Sonic inherits Window {
                             border-radius: line.grouped ? 8px : 0px;
                             background: root.current-track == line.index ? Palette.selected : line.grouped ? Palette.surface : transparent;
                             opacity: root.dragged-track == line.index ? 0.6 : 1;
-                            Rectangle { width: 3px; background: Palette.accent; visible: root.current-track == line.index; }
-                            Rectangle { height: 2px; background: Palette.accent; visible: root.drop-track == line.index && root.dragged-track != line.index; }
+                            Rectangle { x: 0px; y: 0px; width: 3px; height: parent.height; background: Palette.accent-ink; visible: root.current-track == line.index; }
+                            Rectangle { x: 0px; y: 0px; width: parent.width; height: 2px; background: Palette.accent-ink; visible: root.drop-track == line.index && root.dragged-track != line.index; }
                             HorizontalLayout {
                                 padding-left: line.grouped ? 10px : 3px; padding-right: 7px; spacing: 8px;
                                 if !line.grouped: Rectangle {
@@ -815,16 +918,17 @@ export component Sonic inherits Window {
                     Action { width: 76px; label: "Cancel"; clicked => { root.creating-playlist = false; } }
                 }
                 cards := ListView {
-                    property <int> columns: max(1, floor(self.visible-width / 155px));
-                    property <length> card-width: self.visible-width / self.columns;
+                    property <length> gap: 21px;
+                    property <int> columns: max(1, floor((self.visible-width + self.gap) / (173px + self.gap)));
+                    property <length> card-width: (self.visible-width - (self.columns - 1) * self.gap) / self.columns;
                     for row in ceil(root.playlist-cards.length / (self.columns * 1.0)): Rectangle {
-                        height: cards.card-width + 38px;
+                        height: cards.card-width + 38px + cards.gap;
                         for column in min(cards.columns, root.playlist-cards.length - row * cards.columns): Rectangle {
                             property <int> index: row * cards.columns + column;
                             property <PlaylistCard> card: root.playlist-cards[index];
-                            x: column * cards.card-width;
-                            width: cards.card-width - 14px;
-                            height: parent.height;
+                            x: column * (cards.card-width + cards.gap);
+                            width: cards.card-width;
+                            height: parent.height - cards.gap;
                             VerticalLayout {
                                 spacing: 4px;
                                 Rectangle {
@@ -895,7 +999,7 @@ export component Sonic inherits Window {
                             border-radius: 7px;
                             opacity: root.playlist-drag == track-index ? 0.6 : 1;
                             background: Palette.surface;
-                            Rectangle { height: 2px; background: Palette.accent; visible: root.playlist-drop == track-index && root.playlist-drag != track-index; }
+                            Rectangle { x: 0px; y: 0px; width: parent.width; height: 2px; background: Palette.accent-ink; visible: root.playlist-drop == track-index && root.playlist-drag != track-index; }
                             HorizontalLayout {
                                 padding: 4px;
                                 spacing: 6px;
@@ -929,6 +1033,7 @@ export component Sonic inherits Window {
             if root.page == 4: ScrollView {
                 horizontal-stretch: 1;
                 VerticalLayout {
+                    x: 0px; width: min(968px, parent.width);
                     padding-left: 24px; padding-right: 24px; padding-top: 40px; padding-bottom: 16px;
                     spacing: 24px;
                     HorizontalLayout {
@@ -961,7 +1066,7 @@ export component Sonic inherits Window {
                             if root.eq-line != "": Path {
                                 x: 32px; y: 8px; width: parent.width - 48px; height: 58px;
                                 viewbox-width: 1000; viewbox-height: 58;
-                                commands: root.eq-line; stroke: Palette.accent; stroke-width: 2px;
+                                commands: root.eq-line; stroke: Palette.accent-ink; stroke-width: 2px;
                             }
                             for name[index] in ["25","35","49","69","97","137","192","270","380","534","750","1.1k","1.5k","2.1k","2.9k","4.1k","5.8k","8.1k","11.4k","16.0k"]: Label {
                                 text: name; font-size: 8px; width: 30px;
@@ -1200,7 +1305,7 @@ export component Sonic inherits Window {
         background: Palette.surface; border-color: Palette.border; border-width: 1px; border-radius: 10px;
         HorizontalLayout {
             padding-left: 16px; padding-right: 12px; padding-top: 8px; padding-bottom: 8px; spacing: 12px;
-            error-label := Label { text: root.playback-error; color: Palette.accent; font-size: 13px; wrap: word-wrap; horizontal-stretch: 1; }
+            error-label := Label { text: root.playback-error; color: Palette.accent-ink; font-size: 13px; wrap: word-wrap; horizontal-stretch: 1; }
             Action { label: "Dismiss"; width: 72px; clicked => { root.playback-error = ""; } }
         }
     }

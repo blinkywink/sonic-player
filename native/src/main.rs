@@ -629,37 +629,19 @@ impl State {
         } else {
             seed
         };
-        let light_text = match ui.get_text_mode() {
-            1 => true,
-            2 => false,
-            _ => luminance(bg) < 0.45,
-        };
-        let [hue, saturation, lightness] = to_hsl(bg);
-        let surface = from_hsl(hue, saturation, (lightness + 0.10).clamp(0.08, 0.92));
-        let border = from_hsl(hue, saturation, (lightness + 0.16).clamp(0.12, 0.88));
-        let accent = from_hsl(
-            hue,
-            (saturation + 0.15).min(0.80),
-            (lightness + 0.28).clamp(0.25, 0.85),
-        );
+        let theme = theme_colors(bg, ui.get_text_mode());
         let palette = ui.global::<Palette>();
         palette.set_background(color(bg));
-        palette.set_panel(color(surface));
-        palette.set_surface(color(surface));
-        palette.set_border(color(border));
-        palette.set_hover(color(border));
-        palette.set_selected(color(mix(surface, accent, 0.28)));
-        palette.set_text(color(if light_text {
-            [232, 238, 244]
-        } else {
-            [26, 34, 52]
-        }));
-        palette.set_muted(color(if light_text {
-            [156, 168, 184]
-        } else {
-            [74, 85, 104]
-        }));
-        palette.set_accent(color(accent));
+        palette.set_panel(color(theme.surface));
+        palette.set_surface(color(theme.surface));
+        palette.set_border(color(theme.border));
+        palette.set_hover(color(theme.hover));
+        palette.set_selected(color(theme.selected));
+        palette.set_text(color(theme.text));
+        palette.set_muted(color(theme.muted));
+        palette.set_accent(color(theme.accent));
+        palette.set_accent_text(color(theme.accent_text));
+        palette.set_accent_ink(color(theme.accent_ink));
     }
 
     fn use_tracks(
@@ -1804,6 +1786,100 @@ fn luminance(rgb: [u8; 3]) -> f32 {
         }
     });
     0.2126 * r + 0.7152 * g + 0.0722 * b
+}
+
+struct ThemeColors {
+    surface: [u8; 3],
+    border: [u8; 3],
+    hover: [u8; 3],
+    selected: [u8; 3],
+    text: [u8; 3],
+    muted: [u8; 3],
+    accent: [u8; 3],
+    accent_text: [u8; 3],
+    accent_ink: [u8; 3],
+}
+
+fn contrast(first: [u8; 3], second: [u8; 3]) -> f32 {
+    let (a, b) = (luminance(first), luminance(second));
+    (a.max(b) + 0.05) / (a.min(b) + 0.05)
+}
+
+fn contrast_color(
+    preferred: [u8; 3],
+    fallback: [u8; 3],
+    backgrounds: &[[u8; 3]],
+    minimum: f32,
+) -> [u8; 3] {
+    // Keep the theme tint where possible and only move as far as needed.
+    (0..=100)
+        .map(|step| mix(preferred, fallback, step as f32 / 100.0))
+        .find(|&candidate| {
+            backgrounds
+                .iter()
+                .all(|&bg| contrast(candidate, bg) >= minimum)
+        })
+        .unwrap_or(fallback)
+}
+
+fn theme_colors(bg: [u8; 3], text_mode: i32) -> ThemeColors {
+    const LIGHT_TEXT: [u8; 3] = [232, 238, 244];
+    const DARK_TEXT: [u8; 3] = [26, 34, 52];
+    let [hue, saturation, lightness] = to_hsl(bg);
+    let original_surface = from_hsl(hue, saturation, (lightness + 0.10).clamp(0.08, 0.92));
+    let border = from_hsl(hue, saturation, (lightness + 0.16).clamp(0.12, 0.88));
+    let accent = from_hsl(
+        hue,
+        (saturation + 0.15).min(0.80),
+        (lightness + 0.28).clamp(0.25, 0.85),
+    );
+    let light = match text_mode {
+        1 => true,
+        2 => false,
+        _ => luminance(bg) < 0.45 && contrast([255; 3], bg) >= 4.5,
+    };
+    let (preferred, muted_base, extreme) = if light {
+        (LIGHT_TEXT, [156, 168, 184], [255; 3])
+    } else {
+        (DARK_TEXT, [74, 85, 104], [0; 3])
+    };
+    let text = if text_mode == 0 {
+        contrast_color(preferred, extreme, &[bg], 4.5)
+    } else {
+        preferred
+    };
+    let readable_surface = |candidate| {
+        if text_mode == 0 {
+            contrast_color(candidate, bg, &[text], 4.5)
+        } else {
+            candidate
+        }
+    };
+    let surface = readable_surface(original_surface);
+    let hover = readable_surface(border);
+    let selected = readable_surface(mix(surface, accent, 0.28));
+    let backgrounds = [bg, surface, hover, selected];
+    let muted = if text_mode == 0 {
+        contrast_color(muted_base, text, &backgrounds, 4.5)
+    } else {
+        muted_base
+    };
+    let accent_extreme = if contrast([255; 3], accent) >= contrast([0; 3], accent) {
+        [255; 3]
+    } else {
+        [0; 3]
+    };
+    ThemeColors {
+        surface,
+        border,
+        hover,
+        selected,
+        text,
+        muted,
+        accent,
+        accent_text: contrast_color(text, accent_extreme, &[accent], 4.5),
+        accent_ink: contrast_color(accent, text, &backgrounds, 4.5),
+    }
 }
 
 fn sampled_theme(image: &Art) -> Option<[u8; 3]> {
@@ -3112,6 +3188,24 @@ mod parity_tests {
     }
 
     #[test]
+    fn album_themes_keep_controls_and_labels_readable() {
+        for r in (0..=255).step_by(17) {
+            for g in (0..=255).step_by(17) {
+                for b in (0..=255).step_by(17) {
+                    let bg = [r, g, b];
+                    let theme = theme_colors(bg, 0);
+                    assert!(contrast(theme.accent_text, theme.accent) >= 4.5);
+                    for surface in [bg, theme.surface, theme.hover, theme.selected] {
+                        assert!(contrast(theme.text, surface) >= 4.5);
+                        assert!(contrast(theme.muted, surface) >= 4.5);
+                        assert!(contrast(theme.accent_ink, surface) >= 4.5);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn original_search_ignores_punctuation_and_matches_all_words() {
         assert!(library_matches(&["blink", "182"], "Blink-182"));
         assert!(!library_matches(&["blink", "182"], "Blink"));
@@ -3287,6 +3381,18 @@ mod drag_tests {
         assert!(actions.borrow().is_empty());
         drag(ui.window(), location, 0.0);
         assert_eq!(actions.borrow().as_slice(), &[("2".into(), 0)]);
+
+        let query = Rc::new(std::cell::RefCell::new(slint::SharedString::default()));
+        let typed = query.clone();
+        ui.on_search(move |text| *typed.borrow_mut() = text);
+        let search = ElementQuery::from_root(&ui)
+            .match_accessible_label("Search songs and albums…")
+            .find_first()
+            .expect("themed search input");
+        drag(ui.window(), center(&search), 0.0);
+        ui.window()
+            .dispatch_event(WindowEvent::KeyPressed { text: "a".into() });
+        assert_eq!(query.borrow().as_str(), "a");
 
         ui.set_page(4);
         let weak = ui.as_weak();
