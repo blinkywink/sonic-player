@@ -1,4 +1,4 @@
-import { ListView, ScrollView, Slider } from "std-widgets.slint";
+import { ListView, ScrollView } from "std-widgets.slint";
 
 export struct Album { key: string, title: string, artist: string, year: string, art: image, }
 export struct AlbumRow { offset: int, count: int, heading: string, has-year: bool, }
@@ -36,8 +36,8 @@ component LineEdit inherits Rectangle {
     callback accepted;
     callback edited(string);
     forward-focus: field;
-    preferred-height: 38px;
-    min-height: 32px;
+    height: 34px;
+    vertical-stretch: 0;
     min-width: 80px;
     horizontal-stretch: 1;
     border-radius: 8px;
@@ -73,8 +73,8 @@ component ComboBox inherits Rectangle {
     in property <color> field-color: Palette.background;
     in-out property <int> current-index: 0;
     callback selected;
-    preferred-height: 38px;
-    min-height: 32px;
+    height: 34px;
+    vertical-stretch: 0;
     border-radius: 8px;
     border-width: 1px;
     border-color: keyboard.has-focus ? Palette.accent-ink : Palette.border;
@@ -89,7 +89,11 @@ component ComboBox inherits Rectangle {
         }
     }
     Label { x: 10px; width: max(0px, parent.width - 34px); height: parent.height; text: root.model[root.current-index]; }
-    Label { x: parent.width - 22px; width: 14px; height: parent.height; text: "⌄"; horizontal-alignment: center; color: Palette.muted; }
+    Path {
+        x: parent.width - 19px; y: (parent.height - self.height) / 2;
+        width: 8px; height: 5px; viewbox-width: 8; viewbox-height: 5;
+        commands: "M 0 0 L 4 4 L 8 0"; stroke: Palette.text; stroke-width: 1.5px;
+    }
     hit := TouchArea { mouse-cursor: pointer; clicked => { keyboard.focus(); choices.show(); } }
     keyboard := FocusScope {
         focus-on-click: false;
@@ -138,6 +142,8 @@ component Artwork inherits Image {
 component Action inherits Rectangle {
     in property <string> label;
     in property <bool> active;
+    in property <bool> muted-label;
+    in property <int> text-weight: 500;
     callback clicked;
     accessible-role: button;
     accessible-label: label;
@@ -148,7 +154,7 @@ component Action inherits Rectangle {
     animate background { duration: 120ms; easing: ease-out; }
     border-width: 1px;
     border-color: Palette.border;
-    Label { text: root.label; color: root.active ? Palette.accent-text : Palette.text; horizontal-alignment: center; font-weight: 600; }
+    Label { text: root.label; color: root.active ? Palette.accent-text : root.muted-label ? Palette.muted : Palette.text; horizontal-alignment: center; font-weight: root.text-weight; }
     hit := TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
 }
 
@@ -159,10 +165,13 @@ component IconButton inherits Rectangle {
     in property <bool> filled;
     in property <bool> compact;
     in property <bool> highlighted;
+    in property <bool> outlined;
     in property <string> badge;
     callback clicked;
     border-radius: compact ? 20px : 10px;
-    background: filled ? #ffffff : selected ? Palette.accent : hit.has-hover ? Palette.hover : transparent;
+    background: filled ? #ffffff : selected ? Palette.accent : hit.has-hover ? Palette.hover : outlined ? Palette.surface : transparent;
+    border-width: outlined ? 1px : 0px;
+    border-color: Palette.border;
     animate background { duration: 120ms; easing: ease-out; }
     accessible-role: button;
     accessible-label: label;
@@ -170,7 +179,7 @@ component IconButton inherits Rectangle {
     if badge == "": Image {
         x: (parent.width - self.width) / 2;
         y: (parent.height - self.height) / 2;
-        width: compact ? 18px : 16px;
+        width: outlined ? 14px : compact ? 18px : 16px;
         height: self.width;
         source: root.icon;
         colorize: filled ? #0f172a : selected ? Palette.accent-text : highlighted ? Palette.accent-ink : compact ? Palette.text : Palette.muted;
@@ -187,6 +196,7 @@ component PlayerRange inherits Rectangle {
     in property <float> maximum: 1;
     in property <string> label;
     in property <bool> updates-live;
+    in property <bool> show-knob;
     callback committed(float);
     property <float> preview;
     height: 20px;
@@ -195,8 +205,14 @@ component PlayerRange inherits Rectangle {
     accessible-value: value + "";
     track := Rectangle {
         x: 0px; y: (parent.height - self.height) / 2;
-        width: parent.width; height: 6px; border-radius: 3px; background: Palette.border;
-        Rectangle { x: 0px; y: 0px; height: parent.height; width: min(parent.width, max(0px, parent.width * (hit.pressed ? root.preview : root.value) / max(0.01, root.maximum))); border-radius: 3px; background: Palette.text; }
+        width: parent.width; height: 6px; border-radius: 3px; background: root.show-knob ? Palette.muted.with-alpha(0.45) : Palette.border;
+        if !root.show-knob: Rectangle { x: 0px; y: 0px; height: parent.height; width: min(parent.width, max(0px, parent.width * (hit.pressed ? root.preview : root.value) / max(0.01, root.maximum))); border-radius: 3px; background: Palette.text; }
+    }
+    if root.show-knob: Rectangle {
+        width: 14px; height: 14px; border-radius: 7px;
+        x: (parent.width - self.width) * clamp((hit.pressed ? root.preview : root.value) / root.maximum, 0, 1);
+        y: (parent.height - self.height) / 2;
+        background: Palette.accent; border-width: 1px; border-color: Palette.background;
     }
     hit := TouchArea {
         mouse-cursor: pointer;
@@ -228,6 +244,48 @@ component PlayerRange inherits Rectangle {
                 root.committed(min(root.maximum, root.value + root.maximum * 0.05));
                 return accept;
             }
+            return reject;
+        }
+    }
+}
+
+component EqBandSlider inherits Rectangle {
+    in property <float> value;
+    in property <string> label;
+    callback changed(float);
+    height: 100px;
+    accessible-role: slider;
+    accessible-label: label;
+    accessible-value: value + " dB";
+    Rectangle {
+        x: (parent.width - self.width) / 2; y: 0px;
+        width: 6px; height: parent.height; border-radius: 3px;
+        background: Palette.muted.with-alpha(0.45);
+    }
+    Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) * (12 - clamp(root.value, -12, 12)) / 24;
+        width: 14px; height: 14px; border-radius: 7px;
+        background: Palette.accent; border-width: 1px;
+        border-color: keys.has-focus ? Palette.accent-ink : Palette.background;
+    }
+    hit := TouchArea {
+        mouse-cursor: pointer;
+        pointer-event(event) => {
+            if event.button == PointerEventButton.left && event.kind == PointerEventKind.down {
+                keys.focus();
+                root.changed(round(clamp(12 - 24 * self.mouse-y / self.height, -12, 12)));
+            }
+        }
+        moved => {
+            if self.pressed { root.changed(round(clamp(12 - 24 * self.mouse-y / self.height, -12, 12))); }
+        }
+    }
+    keys := FocusScope {
+        focus-on-click: false;
+        key-pressed(event) => {
+            if event.text == Key.UpArrow { root.changed(min(12, root.value + 1)); return accept; }
+            if event.text == Key.DownArrow { root.changed(max(-12, root.value - 1)); return accept; }
             return reject;
         }
     }
@@ -453,6 +511,7 @@ export component Sonic inherits Window {
     callback mute;
     in property <string> selected-key;
     in property <string> album-title;
+    in property <string> album-year;
     in property <string> album-artist;
     in property <bool> track-loading;
     in-out property <string> playback-error;
@@ -483,6 +542,7 @@ export component Sonic inherits Window {
     callback request-visible-art(float, float, float, float, int);
 
     HorizontalLayout {
+        x: 0px; y: 0px; width: parent.width; height: parent.height;
         spacing: 0px;
         if root.page != 1 || !root.sidebar-collapsed: Rectangle {
             width: root.sidebar-width;
@@ -491,9 +551,9 @@ export component Sonic inherits Window {
             Rectangle { x: parent.width - 1px; width: 1px; background: Palette.border; }
             VerticalLayout {
                 padding: 20px;
-                spacing: 18px;
+                spacing: 14px;
                 Rectangle {
-                    height: 56px;
+                    height: 68px;
                     Image {
                         x: (parent.width - self.width) / 2;
                         y: 4px;
@@ -514,7 +574,7 @@ export component Sonic inherits Window {
                     IconButton { width: parent.size; label: "Settings"; icon: @image-url("icons/settings.svg"); selected: root.page == 4; clicked => { root.page = 4; } }
                 }
                 if root.selected-key != "": VerticalLayout {
-                    spacing: 7px;
+                    spacing: 3px;
                     Rectangle {
                         height: root.sidebar-width - 40px;
                         background: Palette.background;
@@ -525,11 +585,12 @@ export component Sonic inherits Window {
                     }
                     Label { text: root.album-title; height: 17px; font-size: 13px; font-weight: 600; }
                     Label { text: root.album-artist == "" ? "—" : root.album-artist; height: 14px; font-size: 11px; color: Palette.muted; }
+                    if root.album-year != "": Label { text: root.album-year; height: 12px; font-size: 11px; color: Palette.muted; }
                     ScrollView {
                         VerticalLayout {
                             spacing: 4px;
                             for track[index] in root.tracks: Rectangle {
-                                height: 37px;
+                                height: 26px;
                                 border-radius: 6px;
                                 property <bool> current: root.track-key == track.key && root.track-key != "";
                                 accessible-role: button;
@@ -605,7 +666,7 @@ export component Sonic inherits Window {
             if !root.layout-locked: Rectangle {
                 x: parent.width - 8px;
                 width: 8px;
-                background: Palette.border;
+                background: transparent;
                 TouchArea {
                     mouse-cursor: col-resize;
                     moved => { if self.pressed { root.sidebar-width = clamp(root.sidebar-width + self.mouse-x - self.pressed-x, 200px, 420px); } }
@@ -613,7 +674,7 @@ export component Sonic inherits Window {
             }
         }
         VerticalLayout {
-            horizontal-stretch: 1;
+            width: root.width - (root.page != 1 || !root.sidebar-collapsed ? root.sidebar-width : 0px);
             spacing: 0px;
             HorizontalLayout {
                 vertical-stretch: 1;
@@ -639,36 +700,38 @@ export component Sonic inherits Window {
                 }
             if root.page == 0 && (root.connected || root.local-enabled): VerticalLayout {
                 horizontal-stretch: 1;
-                padding: 24px; padding-bottom: 16px;
+                padding: 24px; padding-top: 40px; padding-bottom: 16px;
                 spacing: 16px;
                 library-controls := Rectangle {
                     min-width: 0px;
-                    property <bool> stacked: self.width < (root.local-count > 0 ? 660px : 550px);
-                    height: self.stacked ? 84px : 38px;
+                    property <bool> stacked: self.width < (root.local-count > 0 ? 730px : 620px);
+                    height: self.stacked ? 81px : 35px;
                     HorizontalLayout {
                         x: 0px; y: 0px;
-                        width: library-controls.stacked ? parent.width : parent.width - sort-controls.width - 8px;
-                        height: 38px; spacing: 8px;
+                        width: library-controls.stacked ? parent.width : parent.width - sort-controls.width - 12px;
+                        height: 35px; spacing: 12px;
                         LineEdit {
                             min-width: 0px; max-width: 400px; horizontal-stretch: 1; field-color: Palette.surface;
                             placeholder-text: "Search songs and albums…";
                             edited(text) => { root.searching = text != ""; grid.content-y = 0px; root.search(text); }
                         }
-                        if root.local-count > 0: ComboBox { field-color: Palette.surface; width: 110px; model: ["All music", "Local files"]; selected => { root.filter-local(self.current-index == 1); } }
-                        Action { width: 75px; label: "Refresh"; clicked => { root.refresh-library(); } }
+                        if root.local-count > 0: ComboBox { field-color: Palette.surface; width: 104px; model: ["All music", "Local files"]; selected => { root.filter-local(self.current-index == 1); } }
+                        Action { width: 100px; height: 29px; label: "Refresh library"; clicked => { root.refresh-library(); } }
                     }
                     sort-controls := HorizontalLayout {
                         x: library-controls.stacked ? 0px : parent.width - self.width;
                         y: library-controls.stacked ? 46px : 0px;
-                        width: 315px; height: 38px; spacing: 8px;
+                        width: 380px; height: 35px; spacing: 7px;
+                        Label { width: 38px; text: "Sort by"; font-size: 12px; }
                         ComboBox { field-color: Palette.surface;
-                            width: 137px;
+                            width: 116px; height: 30px; current-index: 2;
                             model: ["Title (A–Z)", "Title (Z–A)", "Artist (A–Z)", "Artist (Z–A)", "Year (newest)", "Year (oldest)"];
                             selected => { grid.content-y = 0px; root.sort-albums(self.current-index); }
                         }
-                        ComboBox { field-color: Palette.surface; width: 82px; model: ["None", "Artist", "Year"]; selected => { grid.content-y = 0px; root.group-albums(self.current-index); } }
-                        Action { width: 36px; label: "▦"; active: !root.list-mode; clicked => { root.list-mode = false; grid.content-y = 0px; } }
-                        Action { width: 36px; label: "≡"; active: root.list-mode; clicked => { root.list-mode = true; grid.content-y = 0px; } }
+                        Label { width: 51px; text: "Group by"; font-size: 12px; }
+                        ComboBox { field-color: Palette.surface; width: 72px; height: 30px; model: ["None", "Artist", "Year"]; selected => { grid.content-y = 0px; root.group-albums(self.current-index); } }
+                        IconButton { width: 35px; height: 31px; outlined: true; label: "Grid view"; icon: @image-url("icons/grid.svg"); selected: !root.list-mode; clicked => { root.list-mode = false; grid.content-y = 0px; } }
+                        IconButton { width: 30px; height: 31px; outlined: true; label: "List view"; icon: @image-url("icons/queue.svg"); selected: root.list-mode; clicked => { root.list-mode = true; grid.content-y = 0px; } }
                     }
                 }
                 if root.albums.length == 0: Label {
@@ -727,7 +790,7 @@ export component Sonic inherits Window {
                     property <int> columns: root.list-mode ? 1 : max(1, floor((self.visible-width + self.gap) / (160px + self.gap)));
                     property <length> cover-size: max(1px, (self.visible-width - (self.columns - 1) * self.gap) / self.columns);
                     property <length> row-height: root.list-mode ? 68px : self.cover-size + 55px;
-                    property <length> year-height: root.list-mode ? 0px : 13px;
+                    property <length> year-height: root.list-mode ? 0px : 21px;
                     for row in root.album-rows: Rectangle {
                       height: self.cards-height + (row.heading == "" ? 0px : 27px);
                       property <length> cards-height: grid.row-height + (row.has-year ? grid.year-height : 0px);
@@ -759,7 +822,7 @@ export component Sonic inherits Window {
                                 padding-top: 8px; padding-left: 2px; padding-right: 2px; spacing: 1px;
                                 Label { text: album.title; font-weight: 600; font-size: 13px; height: 16px; }
                                 Label { text: album.artist == "" ? "—" : album.artist; color: Palette.muted; font-size: 12px; height: 14px; }
-                                if album.year != "": Label { text: album.year; color: Palette.muted; font-size: 11px; height: 12px; opacity: 0.8; }
+                                if album.year != "": Label { text: album.year; color: Palette.muted; font-size: 11px; height: 17px; opacity: 0.8; }
                             }
                         }
                         if root.list-mode: HorizontalLayout {
@@ -840,12 +903,16 @@ export component Sonic inherits Window {
                     Label { text: "NOW & UP NEXT · " + (root.queue.length - max(0, root.current-track)) + " TRACKS · " + root.queue-duration; font-size: 15px; font-weight: 600; color: Palette.muted; horizontal-stretch: 1; }
                     if root.queue.length > 0: Action { width: 90px; label: "Clear queue"; clicked => { root.clear-queue(); } }
                 }
-                if root.queue.length == 0: Label {
-                    text: root.connected ? "Queue is empty. Add tracks from Music." : "Sign in to Plex or enable local files in Settings to add and see your queue.";
-                    height: 32px; color: Palette.muted;
+                if root.queue.length == 0: VerticalLayout {
+                    alignment: start; padding-top: 76px; spacing: 24px;
+                    Label { text: "♪"; height: 64px; horizontal-alignment: center; font-size: 48px; color: Palette.muted; opacity: 0.45; }
+                    Label { text: root.connected || root.local-enabled ? "Queue is empty. Add tracks from Music." : "Sign in to Plex or enable local files in Settings to add and see your queue.";
+                        height: 32px; horizontal-alignment: center; font-size: 15px; color: Palette.muted; }
                 }
-                ListView {
+                if root.queue.length == 0: Rectangle { vertical-stretch: 1; }
+                if root.queue.length > 0: ListView {
                     max-width: 776px;
+                    vertical-stretch: 1;
                     for line in root.queue-lines: Rectangle {
                         height: line.height * 1px;
                         if line.index < 0: HorizontalLayout {
@@ -908,7 +975,7 @@ export component Sonic inherits Window {
                 spacing: 21px;
                 HorizontalLayout {
                     spacing: 10px; alignment: start;
-                    Label { text: "Playlists"; font-size: 24px; font-weight: 700; width: 98px; height: 34px; }
+                    Label { text: "Playlists"; font-size: 24px; font-weight: 700; width: 92px; height: 34px; }
                     Action { width: 34px; height: 34px; label: "+"; clicked => { root.creating-playlist = true; } }
                 }
                 if root.creating-playlist: HorizontalLayout {
@@ -917,6 +984,7 @@ export component Sonic inherits Window {
                     Action { width: 81px; label: "Create"; clicked => { root.create-playlist(first-name.text == "" ? "New Playlist" : first-name.text); } }
                     Action { width: 76px; label: "Cancel"; clicked => { root.creating-playlist = false; } }
                 }
+                if root.playlist-cards.length == 0 && !root.creating-playlist: Label { text: "Create a playlist to get started."; height: 32px; color: Palette.muted; }
                 cards := ListView {
                     property <length> gap: 21px;
                     property <int> columns: max(1, floor((self.visible-width + self.gap) / (173px + self.gap)));
@@ -1041,6 +1109,7 @@ export component Sonic inherits Window {
                         for name[index] in ["Playback", "Appearance", "Library", "Tracking"]: Action {
                             width: index == 1 ? 114px : index == 2 ? 81px : 94px;
                             label: name;
+                            muted-label: true;
                             active: root.settings-tab == index;
                             clicked => { root.settings-tab = index; }
                         }
@@ -1049,11 +1118,21 @@ export component Sonic inherits Window {
                         Label { text: "Parametric EQ & normalization"; font-weight: 700; font-size: 16px; height: 23px; }
                         HorizontalLayout {
                             spacing: 10px; alignment: start;
-                            Action { width: 22px; height: 22px; label: root.normalizer-enabled ? "✓" : ""; active: root.normalizer-enabled; clicked => { root.toggle-normalizer(); } }
+                            Rectangle {
+                                width: 22px; height: 22px;
+                                accessible-role: checkbox; accessible-label: "Loudness normalizer";
+                                accessible-action-default => { root.toggle-normalizer(); }
+                                Rectangle {
+                                    width: 17px; height: 17px; border-width: 1px; border-color: Palette.muted;
+                                    background: root.normalizer-enabled ? Palette.accent : white;
+                                    if root.normalizer-enabled: Label { text: "✓"; color: Palette.accent-text; horizontal-alignment: center; }
+                                }
+                                TouchArea { mouse-cursor: pointer; clicked => { root.toggle-normalizer(); } }
+                            }
                             Label { text: "Loudness normalizer"; height: 22px; }
                         }
-                        Text { text: "The normalizer evens out loudness. Preamp adjusts the output level."; wrap: word-wrap; color: Palette.muted; font-size: 13px; }
-                        Label { text: "Preset or adjust each band (dB). Applied to playback."; height: 26px; color: Palette.muted; font-size: 13px; }
+                        Text { text: "The normalizer evens out loudness. Preamp adjusts the output level."; wrap: word-wrap; color: Palette.muted; font-size: 13px; height: 20px; }
+                        Label { text: "Preset or adjust each band (dB). Applied to playback."; height: 20px; color: Palette.muted; font-size: 13px; }
                         Rectangle {
                             height: 96px;
                             Rectangle { x: 32px; width: parent.width - 48px; y: 37px; height: 1px; background: Palette.border; }
@@ -1078,7 +1157,7 @@ export component Sonic inherits Window {
                             spacing: 12px; alignment: start;
                             Label { text: "Preamp"; width: 80px; color: Palette.muted; font-size: 13px; }
                             PlayerRange {
-                                width: 170px; height: 32px;
+                                width: 120px; height: 28px; show-knob: true;
                                 label: "Preamp gain"; maximum: 24; value: root.eq-preamp + 12;
                                 updates-live: true;
                                 committed(value) => { root.eq-level(round(value) - 12); }
@@ -1098,7 +1177,7 @@ export component Sonic inherits Window {
                             for gain[index] in root.eq-gains: VerticalLayout {
                                 spacing: 7px;
                                 Label { text: (gain > 0 ? "+" : "") + gain; horizontal-alignment: center; font-size: 10px; height: 15px; color: Palette.muted; }
-                                Slider { orientation: vertical; height: 100px; minimum: -12; maximum: 12; step: 1; value: gain; changed(value) => { root.eq-band(index, value); } }
+                                EqBandSlider { label: "EQ band " + (index + 1); value: gain; changed(value) => { root.eq-band(index, value); } }
                                 Label {
                                     text: ["25","35","49","69","97","137","192","270","380","534","750","1.1k","1.5k","2.1k","2.9k","4.1k","5.8k","8.1k","11.4k","16.0k"][index];
                                     horizontal-alignment: center; font-size: 11px; height: 18px; color: Palette.muted;
@@ -1111,7 +1190,7 @@ export component Sonic inherits Window {
                         Label { text: "Layout"; font-weight: 700; font-size: 16px; height: 23px; }
                         HorizontalLayout {
                             spacing: 12px; alignment: start;
-                            Label { text: "Sidebar & panels"; width: 96px; color: Palette.muted; font-size: 13px; }
+                            Label { text: "Sidebar & panels"; width: 100px; color: Palette.muted; font-size: 13px; }
                             Action { width: 110px; label: root.layout-locked ? "Locked" : "Unlocked"; active: !root.layout-locked; clicked => { root.layout-locked = !root.layout-locked; } }
                             Label { text: root.layout-locked ? "Resizing disabled" : "Drag edges to resize"; width: 155px; color: Palette.muted; font-size: 12px; }
                         }
@@ -1129,8 +1208,8 @@ export component Sonic inherits Window {
                         }
                         HorizontalLayout {
                             spacing: 8px; alignment: start;
-                            Label { text: "Text color"; width: 100px; color: Palette.muted; }
-                            ComboBox { width: 170px; model: ["Automatic", "Light", "Dark"]; current-index <=> root.text-mode; selected => { root.refresh-theme(); } }
+                            Label { text: "Text"; width: 100px; color: Palette.muted; }
+                            ComboBox { width: 170px; model: ["Auto (from theme color)", "Light", "Dark"]; current-index <=> root.text-mode; selected => { root.refresh-theme(); } }
                         }
                         Action { width: 263px; label: "Use album art color for theme when playing"; active: root.auto-art-theme; clicked => { root.auto-art-theme = !root.auto-art-theme; root.refresh-theme(); } }
                     }
@@ -1139,7 +1218,7 @@ export component Sonic inherits Window {
                         HorizontalLayout {
                             spacing: 12px; alignment: start;
                             Label { text: "App font"; width: 100px; color: Palette.muted; font-size: 13px; }
-                            ComboBox { width: 190px; model: ["System default", "Georgia", "Inter", "Courier New", "Trebuchet MS", "Palatino"]; current-index <=> root.font-index; }
+                            ComboBox { width: 143px; model: ["System default", "Georgia", "Inter", "Courier New", "Trebuchet MS", "Palatino"]; current-index <=> root.font-index; }
                         }
                     }
                     if root.settings-tab == 2: SettingsCard {
@@ -1199,37 +1278,43 @@ export component Sonic inherits Window {
                     if root.settings-tab == 3: SettingsCard {
                         Label { text: "Discord Rich Presence"; font-size: 16px; font-weight: 700; height: 23px; }
                         Text {
-                            text: "Show what you're listening to on Discord. Enter the Application ID from discord.com/developers. The Discord desktop app must be running.";
+                            text: "Show what you're listening to on Discord. Create an application at discord.com/developers, then copy its Application ID. The Discord desktop app must be running.";
                             wrap: word-wrap; color: Palette.muted; font-size: 13px; height: 38px;
                         }
                         HorizontalLayout {
-                            spacing: 8px; alignment: start;
-                            Label { text: "Application ID"; width: 108px; }
-                            LineEdit { text <=> root.discord-id; min-width: 0px; max-width: 235px; horizontal-stretch: 1; placeholder-text: "e.g. 1234567890123456789"; }
+                            height: 34px; spacing: 12px;
+                            Label { text: "Application ID"; width: 120px; font-size: 13px; color: Palette.muted; }
+                            LineEdit { text <=> root.discord-id; min-width: 0px; max-width: 245px; horizontal-stretch: 1; placeholder-text: "e.g. 1234567890123456789"; }
+                            Action { width: 121px; height: 32px; active: true; label: "Test connection"; clicked => { root.discord-test(); } }
+                            Rectangle { horizontal-stretch: 1; }
                         }
                         HorizontalLayout {
-                            spacing: 8px; alignment: start;
-                            Label { text: "Image key"; width: 108px; }
-                            LineEdit { text <=> root.discord-image; min-width: 0px; max-width: 235px; horizontal-stretch: 1; placeholder-text: "Optional"; }
+                            height: 34px; spacing: 12px;
+                            Label { text: "Image key (optional)"; width: 120px; font-size: 13px; color: Palette.muted; }
+                            LineEdit { text <=> root.discord-image; min-width: 0px; max-width: 245px; horizontal-stretch: 1; placeholder-text: "Art asset key from your app"; }
+                            Rectangle { horizontal-stretch: 1; }
                         }
-                        Action { width: 114px; label: "Test connection"; clicked => { root.discord-test(); } }
+                        Text { text: "Hover text on the image will show the album name."; wrap: word-wrap; font-size: 12px; color: Palette.muted; }
                         if root.discord-status != "": Label { text: root.discord-status; height: 22px; color: Palette.muted; }
                     }
                     if root.settings-tab == 3: SettingsCard {
-                    Label { text: "Last.fm Scrobbling"; font-size: 18px; font-weight: 700; height: 36px; }
-                    Label { text: root.lastfm-status; color: Palette.muted; height: 24px; }
-                    if !root.lastfm-connected: HorizontalLayout {
-                        spacing: 6px;
-                        fm-key := LineEdit { placeholder-text: "Last.fm API key"; min-width: 0px; horizontal-stretch: 1; }
-                        fm-secret := LineEdit { placeholder-text: "API secret"; input-type: password; min-width: 0px; horizontal-stretch: 1; }
-                        Action { width: 100px; label: "Connect"; clicked => { root.connect-lastfm(fm-key.text, fm-secret.text); fm-secret.text = ""; } }
-                    }
-                    if root.lastfm-pending: Action { label: "Finish Last.fm sign-in"; clicked => { root.approve-lastfm(); } }
-                    if root.lastfm-connected: HorizontalLayout {
-                        alignment: start; spacing: 8px;
-                        Action { width: 112px; label: "Test connection"; clicked => { root.test-lastfm(); } }
-                        Action { width: 134px; label: "Disconnect"; clicked => { root.disconnect-lastfm(); } }
-                    }
+                        Label { text: "Last.fm Scrobbling"; font-size: 16px; font-weight: 700; height: 23px; }
+                        Label { text: root.lastfm-status; font-size: 13px; font-weight: 600; height: 20px; }
+                        if !root.lastfm-connected: VerticalLayout {
+                            spacing: 6px;
+                            Text { text: "Enter your Last.fm API key and secret, then connect."; wrap: word-wrap; font-size: 13px; color: Palette.muted; }
+                            Label { text: "API Key"; font-size: 13px; height: 20px; }
+                            fm-key := LineEdit { placeholder-text: "Your Last.fm API key"; width: min(342px, parent.width); }
+                            Label { text: "API Secret"; font-size: 13px; height: 20px; }
+                            fm-secret := LineEdit { placeholder-text: "Your Last.fm API secret"; input-type: password; width: min(342px, parent.width); }
+                            Action { height: 32px; label: "Connect to Last.fm"; active: true; clicked => { root.connect-lastfm(fm-key.text, fm-secret.text); fm-secret.text = ""; } }
+                        }
+                        if root.lastfm-pending: Action { label: "Finish Last.fm sign-in"; clicked => { root.approve-lastfm(); } }
+                        if root.lastfm-connected: HorizontalLayout {
+                            alignment: start; spacing: 8px;
+                            Action { width: 112px; label: "Test connection"; clicked => { root.test-lastfm(); } }
+                            Action { width: 134px; label: "Disconnect"; clicked => { root.disconnect-lastfm(); } }
+                        }
                     }
                 }
             }
@@ -1261,7 +1346,7 @@ export component Sonic inherits Window {
                 VerticalLayout {
                     width: footer.show-extra ? 216px : 136px;
                     x: (parent.width - self.width) / 2;
-                    height: 70px; y: 10px;
+                    height: 70px; y: 13px;
                     spacing: 4px;
                     HorizontalLayout {
                         height: 40px; alignment: center; spacing: 4px;

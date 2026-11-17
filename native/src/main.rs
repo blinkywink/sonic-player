@@ -1983,7 +1983,7 @@ fn main() -> Result<()> {
         plex_albums: Vec::new(),
         local_albums: Vec::new(),
         local_scan: 0,
-        album_sort: 0,
+        album_sort: 2,
         album_group: 0,
         album_columns: 1,
         album_rows,
@@ -2075,6 +2075,7 @@ fn main() -> Result<()> {
             state.borrow_mut().tracks.clear();
             ui.set_selected_key("".into());
             ui.set_album_title("".into());
+            ui.set_album_year("".into());
             ui.set_album_artist("".into());
             ui.set_tracks(ModelRc::default());
         }
@@ -2091,6 +2092,11 @@ fn main() -> Result<()> {
             state.tracks.clear();
             ui.set_selected_key(key.clone());
             ui.set_album_title(album.title.as_str().into());
+            ui.set_album_year(if album.year > 0 {
+                album.year.to_string().into()
+            } else {
+                "".into()
+            });
             ui.set_album_artist(album.parent_title.as_str().into());
             ui.set_selected_art(state.artwork.get(key.as_str()).cloned().unwrap_or_default());
             if let Some(tracks) = state.loaded_tracks.get(key.as_str()).cloned() {
@@ -2220,6 +2226,7 @@ fn main() -> Result<()> {
                     state.tracks.clear();
                     ui.set_selected_key("".into());
                     ui.set_album_title("".into());
+                    ui.set_album_year("".into());
                     ui.set_album_artist("".into());
                     ui.set_tracks(ModelRc::default());
                 }
@@ -2875,6 +2882,7 @@ fn main() -> Result<()> {
             ui.set_connected(false);
             ui.set_selected_key("".into());
             ui.set_album_title("".into());
+            ui.set_album_year("".into());
             ui.set_album_artist("".into());
             ui.set_tracks(ModelRc::default());
             ui.set_status(match forget {
