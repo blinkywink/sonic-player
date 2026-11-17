@@ -3788,6 +3788,16 @@ mod drag_tests {
         let queue_move = Rc::new(std::cell::Cell::new(None));
         let result = queue_move.clone();
         ui.on_move_queue(move |row, delta| result.set(Some((row, delta))));
+        // Space plays and pauses from anywhere, including after clicking a row.
+        let toggles = Rc::new(std::cell::Cell::new(0));
+        let counted = toggles.clone();
+        ui.on_toggle_play(move || counted.set(counted.get() + 1));
+        let space = |ui: &Sonic| {
+            ui.window().dispatch_event(WindowEvent::KeyPressed { text: " ".into() });
+            ui.window().dispatch_event(WindowEvent::KeyReleased { text: " ".into() });
+        };
+        space(&ui);
+        assert_eq!(toggles.get(), 1);
         // Only album-grouped rows get a drag handle, like the original Queue page.
         let handles = grips(&ui);
         assert_eq!(handles.len(), 2);
@@ -3820,6 +3830,9 @@ mod drag_tests {
             result.set(Some((row, action, playlist)))
         });
         let row = LogicalPosition::new(from.x + 200.0, from.y);
+        click(ui.window(), LogicalPosition::new(row.x, center(&handles[1]).y), PointerEventButton::Left);
+        space(&ui);
+        assert_eq!(toggles.get(), 2, "Space still toggles after a row has focus");
         click(ui.window(), row, PointerEventButton::Right);
         let item = |label: &str| {
             ElementQuery::from_root(&ui)
@@ -3958,6 +3971,11 @@ mod drag_tests {
         ui.window()
             .dispatch_event(WindowEvent::KeyPressed { text: "a".into() });
         assert_eq!(query.borrow().as_str(), "a");
+        // While typing in search, Space types a space instead of pausing.
+        let before = toggles.get();
+        ui.window().dispatch_event(WindowEvent::KeyPressed { text: " ".into() });
+        assert_eq!(toggles.get(), before);
+        assert_eq!(query.borrow().as_str(), "a ");
 
         ui.set_page(4);
         let weak = ui.as_weak();

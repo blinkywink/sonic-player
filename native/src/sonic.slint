@@ -496,7 +496,7 @@ component RowInput inherits TouchArea {
         focus-on-click: false;
         enabled: root.enabled;
         key-pressed(event) => {
-            if root.enabled && (event.text == Key.Return || event.text == " ") {
+            if root.enabled && event.text == Key.Return {
                 root.activate();
                 return accept;
             }
@@ -679,7 +679,6 @@ export component Sonic inherits Window {
     in property <string> lyrics-status;
     in property <bool> lyrics-loading;
     in-out property <bool> online-lyrics: true;
-    in-out property <bool> show-lyrics: true;
     callback lyrics-layout(int);
     callback toggle-online-lyrics;
     // Playlist pending deletion confirmation (-1 = none).
@@ -732,6 +731,16 @@ export component Sonic inherits Window {
 
     callback request-visible-art(float, float, float, float, int);
 
+    shortcuts := FocusScope {
+    x: 0px; y: 0px; width: root.width; height: root.height;
+    init => { self.focus(); }
+    key-pressed(event) => {
+        if event.text == " " && !event.repeat && !event.modifiers.control && !event.modifiers.alt {
+            root.toggle-play();
+            return accept;
+        }
+        return reject;
+    }
     HorizontalLayout {
         x: 0px; y: 0px; width: parent.width; height: parent.height;
         spacing: 0px;
@@ -1055,7 +1064,7 @@ export component Sonic inherits Window {
                                 Artwork { width: parent.width; height: parent.height; source: album.art; }
                                 // Selection ring drawn inside the cover so the grid edges never clip it.
                                 if root.selected-key == album.key: Rectangle {
-                                    border-radius: 14px; border-width: 2px; border-color: Palette.text.with-alpha(0.55);
+                                    border-radius: 14px; border-width: 3px; border-color: Palette.text.with-alpha(0.8);
                                 }
                             }
                             VerticalLayout {
@@ -1106,7 +1115,7 @@ export component Sonic inherits Window {
             if root.page == 1: now-playing := Rectangle {
                 horizontal-stretch: 1;
                 property <bool> has-lyrics: root.lyrics.length > 0;
-                property <bool> want-lyrics: root.show-lyrics && root.current-track >= 0;
+                property <bool> want-lyrics: root.current-track >= 0;
                 // Stay in the lyrics layout while the next song's lyrics load, so skipping
                 // doesn't bounce the cover between layouts.
                 property <bool> lyrics-mode: self.want-lyrics && (self.has-lyrics || root.lyrics-loading);
@@ -1140,10 +1149,6 @@ export component Sonic inherits Window {
                     property <length> lyrics-panel-bottom: 40px + (now-playing.area-height - now-playing.info-height + min(420px, now-playing.area-height - 64px - now-playing.info-height)) / 2;
                     Label { text: root.track-title; height: 26px; font-size: 20px; font-weight: 700; }
                     Label { text: root.track-artist; height: 20px; font-size: 15px; color: Palette.muted; }
-                }
-                if now-playing.want-lyrics && !now-playing.lyrics-mode && root.lyrics-status != "": Label {
-                    y: now-playing.cover-y + now-playing.cover-size + 70px; height: 20px; width: parent.width;
-                    horizontal-alignment: center; text: root.lyrics-status; font-size: 13px; color: Palette.muted;
                 }
                 if now-playing.split || now-playing.lyrics-only: lyrics-panel := Rectangle {
                     // Same top and bottom as the cover beside it.
@@ -1198,13 +1203,6 @@ export component Sonic inherits Window {
                     icon: @image-url("icons/chevron-left.svg");
                     icon-rotation: root.sidebar-collapsed ? 180deg : 0deg;
                     clicked => { root.sidebar-collapsed = !root.sidebar-collapsed; }
-                }
-                if root.current-track >= 0: GlassButton {
-                    x: parent.width - self.width - 36px; y: 52px; width: 36px; height: 36px;
-                    label: root.show-lyrics ? "Hide lyrics" : "Show lyrics";
-                    icon: @image-url("icons/mic.svg");
-                    active: root.show-lyrics;
-                    clicked => { root.show-lyrics = !root.show-lyrics; }
                 }
             }
             if root.page == 2: Rectangle {
@@ -2053,5 +2051,6 @@ export component Sonic inherits Window {
                 }
             }
         }
+    }
     }
 }
