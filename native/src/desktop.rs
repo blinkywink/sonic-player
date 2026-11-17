@@ -273,3 +273,33 @@ fn ico_image(file: &[u8]) -> Option<&[u8]> {
     let offset = u32::from_le_bytes(entry[12..16].try_into().ok()?) as usize;
     file.get(offset..offset.checked_add(size)?)
 }
+
+/// Opens the Windows color dialog over Sonic, like the original's color input.
+pub fn pick_color(ui: &crate::Sonic, initial: [u8; 3]) -> Option<[u8; 3]> {
+    use windows_sys::Win32::UI::Controls::Dialogs::{CC_FULLOPEN, CC_RGBINIT, CHOOSECOLORW, ChooseColorW};
+    let owner = ui
+        .window()
+        .window_handle()
+        .window_handle()
+        .ok()
+        .and_then(|handle| match handle.as_raw() {
+            RawWindowHandle::Win32(handle) => Some(handle.hwnd.get() as HWND),
+            _ => None,
+        })
+        .unwrap_or(null_mut());
+    let [r, g, b] = initial;
+    let mut custom = [0u32; 16];
+    let mut dialog = CHOOSECOLORW {
+        lStructSize: size_of::<CHOOSECOLORW>() as u32,
+        hwndOwner: owner,
+        rgbResult: u32::from(r) | (u32::from(g) << 8) | (u32::from(b) << 16),
+        lpCustColors: custom.as_mut_ptr(),
+        Flags: CC_RGBINIT | CC_FULLOPEN,
+        ..Default::default()
+    };
+    if unsafe { ChooseColorW(&mut dialog) } == 0 {
+        return None;
+    }
+    let color = dialog.rgbResult;
+    Some([color as u8, (color >> 8) as u8, (color >> 16) as u8])
+}

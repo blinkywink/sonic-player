@@ -383,6 +383,7 @@ impl State {
 
     fn present_tracks(&mut self, ui: &Sonic, tracks: Vec<Entry>) {
         ui.set_tracks(track_model(&tracks));
+        ui.set_album_details(tracks.first().map(Entry::details).unwrap_or_default().into());
         self.tracks = tracks;
     }
 
@@ -528,6 +529,13 @@ impl State {
             ui.set_track_artist(track.grandparent_title.as_str().into());
             ui.set_duration(track.duration as f32 / 1000.0);
             ui.set_total(clock(track.duration / 1000).into());
+            if let Some(art) = self
+                .artwork
+                .get(&track_art_key(track))
+                .or_else(|| self.artwork.get(&track.parent_rating_key))
+            {
+                ui.set_playing_art(art.clone());
+            }
         }
     }
 
@@ -630,6 +638,7 @@ impl State {
             seed
         };
         let theme = theme_colors(bg, ui.get_text_mode());
+        ui.set_theme_swatch(color(seed));
         let palette = ui.global::<Palette>();
         palette.set_background(color(bg));
         palette.set_panel(color(theme.surface));
@@ -658,11 +667,17 @@ impl State {
         match action {
             0 => self.load_queue(ui, tx, tracks, 0),
             1 => {
+                let was_empty = self.queue.is_empty();
                 if !self.original_order.is_empty() {
                     self.original_order
                         .extend(tracks.iter().map(|track| track.rating_key.clone()));
                 }
                 self.queue.extend(tracks);
+                if was_empty {
+                    // Like the original, the first queued track is loaded (paused) in the player.
+                    self.current = 0;
+                    self.present_queued_track(ui);
+                }
                 self.publish_queue(ui);
                 ui.set_status("Added to queue".into());
             }
@@ -685,10 +700,12 @@ impl State {
                 self.publish_queue(ui);
             }
         }
-        if self.pending_art.len() >= 4 || !matches!(ui.get_page(), 2 | 3) {
+        // The sidebar mini queue is visible on every page while no album is open.
+        let sidebar_queue = ui.get_selected_key().is_empty() && !self.queue.is_empty();
+        if self.pending_art.len() >= 4 || !(matches!(ui.get_page(), 2 | 3) || sidebar_queue) {
             return;
         }
-        let tracks = if ui.get_page() == 2 {
+        let tracks = if ui.get_page() != 3 || ui.get_playlist_current() < 0 {
             self.queue.get(self.current..).unwrap_or_default()
         } else if let Some(playlist) = self.data.playlists.get(ui.get_playlist_current() as usize) {
             if playlist
@@ -776,6 +793,10 @@ impl State {
             &tracks,
             self.current,
         ))));
+        ui.set_sidebar_lines(ModelRc::new(VecModel::from(sidebar_lines(
+            &tracks,
+            self.current,
+        ))));
         ui.set_queue(ModelRc::new(VecModel::from(tracks)));
         let total = self
             .queue
@@ -784,10 +805,11 @@ impl State {
             .map(|track| track.duration)
             .sum::<u64>()
             / 1000;
+        // Same wording as the original header: "1H 6M" or "42M".
         let label = if total >= 3600 {
-            format!("{} HR {} MIN", total / 3600, (total / 60) % 60)
+            format!("{}H {}M", total / 3600, (total / 60) % 60)
         } else {
-            format!("{} MIN", total / 60)
+            format!("{}M", total / 60)
         };
         ui.set_queue_duration(label.into());
         ui.set_current_track(if self.queue.is_empty() {
@@ -1359,7 +1381,15 @@ impl State {
                         None
                     };
                     self.artwork.insert(key.clone(), art.clone());
-                    if matches!(ui.get_page(), 2 | 3) {
+                    if self
+                        .queue
+                        .get(self.current)
+                        .is_some_and(|track| track_art_key(track) == key)
+                        && ui.get_playing_art().size().width == 0
+                    {
+                        ui.set_playing_art(art.clone());
+                    }
+                    if matches!(ui.get_page(), 2 | 3) || ui.get_selected_key().is_empty() {
                         self.track_art_changed = true;
                     }
                     if let Some(evicted) = evicted
@@ -1610,7 +1640,45 @@ fn track_art_key(track: &Entry) -> String {
     }
 }
 
+/// Row sizes (visual height, gap below) for one queue presentation, in logical pixels.
+struct QueueLayout {
+    header: (i32, i32),
+    grouped_row: (i32, i32),
+    single_row: (i32, i32),
+    group_gap: i32,
+    /// The Queue page stops grouping when an album appears in more than one run.
+    flatten_repeats: bool,
+}
+
+/// Matches the original Queue page: 48px album header + 9px, 36px rows 4px apart,
+/// 52px single rows, 21px between groups.
+const QUEUE_PAGE: QueueLayout = QueueLayout {
+    header: (48, 9),
+    grouped_row: (36, 4),
+    single_row: (52, 21),
+    group_gap: 21,
+    flatten_repeats: true,
+};
+
+/// Matches the original sidebar mini queue: 44px header + 6px, 40px rows 4px apart,
+/// 48px single rows, 10px between groups.
+const QUEUE_SIDEBAR: QueueLayout = QueueLayout {
+    header: (44, 6),
+    grouped_row: (40, 4),
+    single_row: (48, 10),
+    group_gap: 10,
+    flatten_repeats: false,
+};
+
 fn queue_lines(tracks: &[QueueTrack], current: usize) -> Vec<QueueLine> {
+    layout_queue(tracks, current, &QUEUE_PAGE)
+}
+
+fn sidebar_lines(tracks: &[QueueTrack], current: usize) -> Vec<QueueLine> {
+    layout_queue(tracks, current, &QUEUE_SIDEBAR)
+}
+
+fn layout_queue(tracks: &[QueueTrack], current: usize, layout: &QueueLayout) -> Vec<QueueLine> {
     let mut runs: Vec<(usize, usize)> = Vec::new();
     let mut seen = HashSet::new();
     let mut repeated = false;
@@ -1627,17 +1695,20 @@ fn queue_lines(tracks: &[QueueTrack], current: usize) -> Vec<QueueLine> {
         repeated |= !seen.insert(track.album_key.as_str());
         runs.push((start, index));
     }
+    let flat = layout.flatten_repeats && repeated;
+    let line = |index: i32, (height, gap): (i32, i32), grouped, track: &QueueTrack, number| QueueLine {
+        index,
+        height: height + gap,
+        gap,
+        grouped,
+        track: track.clone(),
+        number,
+    };
     let mut lines = Vec::with_capacity(tracks.len().saturating_sub(current) + runs.len());
     for (start, end) in runs {
-        let grouped = !repeated && end - start > 1;
+        let grouped = !flat && end - start > 1;
         if grouped {
-            lines.push(QueueLine {
-                index: -1,
-                height: 57,
-                grouped: true,
-                track: tracks[start].clone(),
-                number: 0,
-            });
+            lines.push(line(-1, layout.header, true, &tracks[start], 0));
         }
         for (index, track) in tracks.iter().enumerate().take(end).skip(start) {
             let number = if track.number > 0 {
@@ -1645,13 +1716,14 @@ fn queue_lines(tracks: &[QueueTrack], current: usize) -> Vec<QueueLine> {
             } else {
                 (index - start + 1) as i32
             };
-            lines.push(QueueLine {
-                index: index as i32,
-                height: if grouped { 38 } else { 52 },
-                grouped,
-                track: track.clone(),
-                number,
-            });
+            let size = match (grouped, flat) {
+                (true, _) if index + 1 == end => (layout.grouped_row.0, layout.group_gap),
+                (true, _) => layout.grouped_row,
+                // A repeated-album queue is one flat list with 4px gaps, like the original.
+                (false, true) => (layout.single_row.0, 4),
+                (false, false) => layout.single_row,
+            };
+            lines.push(line(index as i32, size, grouped, track, number));
         }
     }
     lines
@@ -2078,6 +2150,7 @@ fn main() -> Result<()> {
             ui.set_album_year("".into());
             ui.set_album_artist("".into());
             ui.set_tracks(ModelRc::default());
+            ui.set_album_details("".into());
         }
     });
     ui.on_select_album({
@@ -2104,6 +2177,7 @@ fn main() -> Result<()> {
                 return;
             }
             ui.set_tracks(ModelRc::default());
+            ui.set_album_details("".into());
             state.fetch_tracks(key.as_str(), &tx);
         }
     });
@@ -2125,6 +2199,28 @@ fn main() -> Result<()> {
             let mut state = state.borrow_mut();
             if let Some(tracks) = state.loaded_tracks.get(key.as_str()).cloned() {
                 state.splice_play(&ui, &tx, tracks, index as usize);
+            }
+        }
+    });
+    ui.on_search_hit_action({
+        let (state, weak, tx) = (state.clone(), ui.as_weak(), tx.clone());
+        move |key, index, action, target| {
+            let Some(ui) = weak.upgrade() else { return };
+            let mut state = state.borrow_mut();
+            let Some(tracks) = state.loaded_tracks.get(key.as_str()).cloned() else {
+                return;
+            };
+            let index = index as usize;
+            let Some(track) = tracks.get(index).cloned() else { return };
+            if action == 2 {
+                // Shuffle the album and start from the chosen song, like the album track menu.
+                let mut order: Vec<_> = (0..tracks.len()).collect();
+                fastrand::shuffle(&mut order);
+                let selected = order.iter().position(|&row| row == index).unwrap_or_default();
+                let shuffled = order.into_iter().map(|row| tracks[row].clone()).collect();
+                state.splice_play(&ui, &tx, shuffled, selected);
+            } else {
+                state.use_tracks(&ui, &tx, vec![track], action, target);
             }
         }
     });
@@ -2621,6 +2717,7 @@ fn main() -> Result<()> {
             let Some(ui) = weak.upgrade() else { return };
             let name = name.trim();
             if name.is_empty() {
+                ui.set_playlist_target(-1);
                 return;
             }
             let mut state = state.borrow_mut();
@@ -2630,6 +2727,7 @@ fn main() -> Result<()> {
                 ..Playlist::default()
             });
             ui.set_playlist_target(index);
+            ui.set_creating_playlist(false);
             state.publish_playlists(&ui);
             state.save(&ui, "Playlist created");
         }
@@ -2653,17 +2751,25 @@ fn main() -> Result<()> {
             }
         }
     });
-    ui.on_delete_playlist({
+    ui.on_delete_playlist_at({
         let (state, weak) = (state.clone(), ui.as_weak());
-        move || {
+        move |index| {
             let Some(ui) = weak.upgrade() else { return };
             let mut state = state.borrow_mut();
-            let index = ui.get_playlist_current() as usize;
+            let Ok(index) = usize::try_from(index) else { return };
             if index >= state.data.playlists.len() {
                 return;
             }
             state.data.playlists.remove(index);
-            ui.set_playlist_current(-1);
+            let current = ui.get_playlist_current();
+            ui.set_playlist_current(match current {
+                c if c == index as i32 => -1,
+                c if c > index as i32 => c - 1,
+                c => c,
+            });
+            if ui.get_playlist_target() >= index as i32 {
+                ui.set_playlist_target(ui.get_playlist_target() - 1);
+            }
             state.publish_playlists(&ui);
             state.save(&ui, "Playlist deleted");
         }
@@ -2814,6 +2920,21 @@ fn main() -> Result<()> {
             } else {
                 ui.set_status("Enter a color such as #204070.".into());
             }
+        }
+    });
+    ui.on_pick_theme_color({
+        let weak = ui.as_weak();
+        move || {
+            let Some(ui) = weak.upgrade() else { return };
+            #[cfg(windows)]
+            {
+                let seed = parse_theme(ui.get_theme_value().as_str()).unwrap_or([15, 23, 42]);
+                if let Some([r, g, b]) = desktop::pick_color(&ui, seed) {
+                    ui.invoke_save_theme(format!("#{r:02x}{g:02x}{b:02x}").into());
+                }
+            }
+            #[cfg(not(windows))]
+            let _ = ui;
         }
     });
     ui.on_refresh_theme({
@@ -3244,6 +3365,12 @@ mod drag_tests {
         });
     }
 
+    fn click(window: &slint::Window, position: LogicalPosition, button: PointerEventButton) {
+        window.dispatch_event(WindowEvent::PointerMoved { position });
+        window.dispatch_event(WindowEvent::PointerPressed { position, button });
+        window.dispatch_event(WindowEvent::PointerReleased { position, button });
+    }
+
     fn center(element: &i_slint_backend_testing::ElementHandle) -> LogicalPosition {
         let origin = element.absolute_position();
         let size = element.size();
@@ -3287,21 +3414,69 @@ mod drag_tests {
         let queue_move = Rc::new(std::cell::Cell::new(None));
         let result = queue_move.clone();
         ui.on_move_queue(move |row, delta| result.set(Some((row, delta))));
+        // Only album-grouped rows get a drag handle, like the original Queue page.
         let handles = grips(&ui);
-        assert_eq!(handles.len(), 3);
+        assert_eq!(handles.len(), 2);
         let from = center(&handles[0]);
-        drag(ui.window(), from, center(&handles[2]).y - from.y);
-        assert_eq!(queue_move.get(), Some((0, 2)));
+        drag(ui.window(), from, center(&handles[1]).y - from.y);
+        assert_eq!(queue_move.get(), Some((0, 1)));
+
+        // At rest a grouped row shows its duration; hovering swaps in the remove button.
+        let removes = |ui: &Sonic| {
+            ElementQuery::from_root(ui)
+                .match_accessible_label("Remove from queue")
+                .find_all()
+                .into_iter()
+                .filter(|e| e.absolute_position().x > 260.0)
+                .count()
+        };
+        ui.window().dispatch_event(WindowEvent::PointerMoved {
+            position: LogicalPosition::new(1150.0, 700.0),
+        });
+        assert_eq!(removes(&ui), 0);
+        ui.window().dispatch_event(WindowEvent::PointerMoved {
+            position: LogicalPosition::new(from.x + 200.0, from.y),
+        });
+        assert_eq!(removes(&ui), 1);
+        // Right-clicking a Queue row opens Sonic's own menu with all three actions.
+        ui.set_playlists(ModelRc::new(VecModel::from(vec![slint::SharedString::from("Fixture")])));
+        let saved = Rc::new(std::cell::Cell::new(None));
+        let result = saved.clone();
+        ui.on_queue_track_action(move |row, action, playlist| {
+            result.set(Some((row, action, playlist)))
+        });
+        let row = LogicalPosition::new(from.x + 200.0, from.y);
+        click(ui.window(), row, PointerEventButton::Right);
+        let item = |label: &str| {
+            ElementQuery::from_root(&ui)
+                .match_accessible_label(label)
+                .find_first()
+                .unwrap_or_else(|| panic!("menu item {label}"))
+        };
+        for label in ["Add to queue", "Shuffle play", "Add to playlist"] {
+            item(label);
+        }
+        // A real pointer click on the item runs it and closes the menu.
+        click(ui.window(), center(&item("Add to queue")), PointerEventButton::Left);
+        assert_eq!(saved.get(), Some((0, 1, -1)));
+        assert!(
+            ElementQuery::from_root(&ui)
+                .match_accessible_label("Shuffle play")
+                .find_first()
+                .is_none()
+        );
+        // "Add to playlist" opens the picker, and choosing a playlist saves the row there.
+        click(ui.window(), row, PointerEventButton::Right);
+        click(ui.window(), center(&item("Add to playlist")), PointerEventButton::Left);
+        item("Fixture").invoke_accessible_default_action();
+        assert_eq!(saved.get(), Some((0, 3, 0)));
 
         ui.set_page(3);
         ui.set_playlist_current(0);
         ui.set_playlist_name("Fixture".into());
         ui.set_playlist_items(ModelRc::new(VecModel::from(tracks.to_vec())));
-        let edit = ElementQuery::from_root(&ui)
-            .match_accessible_label("Edit playlist")
-            .find_first()
-            .unwrap();
-        edit.invoke_accessible_default_action();
+        item("Playlist options").invoke_accessible_default_action();
+        item("Edit playlist").invoke_accessible_default_action();
         let playlist_move = Rc::new(std::cell::Cell::new(None));
         let result = playlist_move.clone();
         ui.on_move_playlist_track(move |row, delta| result.set(Some((row, delta))));
@@ -3389,6 +3564,14 @@ mod drag_tests {
         assert!(actions.borrow().is_empty());
         drag(ui.window(), location, 0.0);
         assert_eq!(actions.borrow().as_slice(), &[("2".into(), 0)]);
+        // Album tiles use the same menu: Shuffle play sends action 2 for that album.
+        click(ui.window(), location, PointerEventButton::Right);
+        let shuffle = ElementQuery::from_root(&ui)
+            .match_accessible_label("Shuffle play")
+            .find_first()
+            .expect("album menu");
+        click(ui.window(), center(&shuffle), PointerEventButton::Left);
+        assert_eq!(actions.borrow().last(), Some(&("2".into(), 2)));
 
         let query = Rc::new(std::cell::RefCell::new(slint::SharedString::default()));
         let typed = query.clone();

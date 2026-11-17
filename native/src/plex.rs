@@ -47,6 +47,13 @@ pub struct Entry {
     pub disc: u32,
     #[serde(default, rename = "Media")]
     pub(crate) media: Vec<Media>,
+    /// Bitrate in kbps for local files (Plex reports it on `Media`).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub bitrate: u32,
+}
+
+fn is_zero(value: &u32) -> bool {
+    *value == 0
 }
 
 impl Entry {
@@ -58,12 +65,42 @@ impl Entry {
             ..Self::default()
         })
     }
+
+    /// Sidebar "Details" line, e.g. "320 kbps  FLAC".
+    pub fn details(&self) -> String {
+        let media = self.media.first();
+        let bitrate = media.and_then(|m| m.bitrate).unwrap_or(self.bitrate);
+        let format = media
+            .and_then(|m| m.container.clone().or_else(|| m.audio_codec.clone()))
+            .or_else(|| {
+                self.local_path
+                    .as_ref()
+                    .and_then(|p| p.extension())
+                    .map(|e| e.to_string_lossy().into_owned())
+            })
+            .unwrap_or_default()
+            .to_uppercase();
+        let mut parts = Vec::new();
+        if (1..=9999).contains(&bitrate) {
+            parts.push(format!("{bitrate} kbps"));
+        }
+        if !format.is_empty() {
+            parts.push(format);
+        }
+        parts.join("  ")
+    }
 }
 
 #[derive(Clone, Deserialize, PartialEq, Serialize)]
 pub(crate) struct Media {
     #[serde(default, rename = "Part")]
     parts: Vec<Part>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    bitrate: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    container: Option<String>,
+    #[serde(default, rename = "audioCodec", skip_serializing_if = "Option::is_none")]
+    audio_codec: Option<String>,
 }
 
 #[derive(Clone, Deserialize, PartialEq, Serialize)]

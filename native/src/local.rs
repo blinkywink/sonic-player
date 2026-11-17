@@ -90,6 +90,11 @@ fn track(path: &Path) -> Option<(String, Entry)> {
         .and_then(|f| f.primary_tag().or_else(|| f.first_tag()));
     if let Some(file) = &tagged {
         track.duration = file.properties().duration().as_millis() as u64;
+        track.bitrate = file
+            .properties()
+            .audio_bitrate()
+            .or(file.properties().overall_bitrate())
+            .unwrap_or_default();
     }
     if let Some(tag) = tag {
         if let Some(title) = tag.title() {
