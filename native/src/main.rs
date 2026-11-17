@@ -1159,7 +1159,7 @@ impl State {
             thread::spawn(move || {
                 let art = path
                     .and_then(|p| local::art(&p))
-                    .and_then(|data| decode_cover(&data));
+                    .and_then(|data| decode_cover_at_size(&data, 640));
                 let _ = art_tx.send(Event::PlayingArt(generation, art));
             });
         } else if !thumb.is_empty()
@@ -1167,7 +1167,10 @@ impl State {
         {
             let (art_plex, art_tx, thumb) = (plex.clone(), tx.clone(), thumb.clone());
             thread::spawn(move || {
-                let _ = art_tx.send(Event::PlayingArt(generation, cover(&art_plex, &thumb)));
+                let _ = art_tx.send(Event::PlayingArt(
+                    generation,
+                    cover_at_size(&art_plex, &thumb, 640),
+                ));
             });
         }
         if let Some(handoff) = handoff {
@@ -1543,14 +1546,20 @@ fn load_audio(plex: Option<Plex>, track: Entry, cancel: Arc<AtomicBool>) -> Resu
 }
 
 fn cover(plex: &Plex, thumb: &str) -> Option<Art> {
+    cover_at_size(plex, thumb, 400)
+}
+
+fn cover_at_size(plex: &Plex, thumb: &str, size: u32) -> Option<Art> {
+    let size_query = size.to_string();
     let response = plex
         .request("/photo/:/transcode")
         .ok()?
         .query(&[
             ("url", thumb),
-            ("width", "320"),
-            ("height", "320"),
-            ("minSize", "1"),
+            ("width", size_query.as_str()),
+            ("height", size_query.as_str()),
+            ("minSize", "0"),
+            ("upscale", "0"),
         ])
         .timeout(Duration::from_secs(8))
         .send()
@@ -1559,10 +1568,14 @@ fn cover(plex: &Plex, thumb: &str) -> Option<Art> {
         .ok()?;
     let mut data = Vec::new();
     response.take(2 * 1024 * 1024).read_to_end(&mut data).ok()?;
-    decode_cover(&data)
+    decode_cover_at_size(&data, size)
 }
 
 fn decode_cover(data: &[u8]) -> Option<Art> {
+    decode_cover_at_size(data, 400)
+}
+
+fn decode_cover_at_size(data: &[u8], size: u32) -> Option<Art> {
     let mut reader = image::ImageReader::new(std::io::Cursor::new(data))
         .with_guessed_format()
         .ok()?;
@@ -1570,7 +1583,14 @@ fn decode_cover(data: &[u8]) -> Option<Art> {
     limits.max_image_width = Some(2048);
     limits.max_image_height = Some(2048);
     reader.limits(limits);
-    let pixels = reader.decode().ok()?.thumbnail(320, 320).into_rgba8();
+    let image = reader.decode().ok()?;
+    let pixels = if image.width().max(image.height()) > size {
+        image
+            .resize(size, size, image::imageops::FilterType::Lanczos3)
+            .into_rgba8()
+    } else {
+        image.into_rgba8()
+    };
     Some(SharedPixelBuffer::clone_from_slice(
         pixels.as_raw(),
         pixels.width(),
@@ -2816,7 +2836,7 @@ fn main() -> Result<()> {
             if let Some(ui) = weak.upgrade() {
                 ui.set_eq_preamp(state.eq_preamp);
             }
-            state.equalizer.update(&state.eq_gains, state.eq_preamp);
+            state.equalizer.set_preamp(state.eq_preamp);
         }
     });
     ui.on_eq_preset({
@@ -3259,5 +3279,21 @@ mod drag_tests {
         assert!(actions.borrow().is_empty());
         drag(ui.window(), location, 0.0);
         assert_eq!(actions.borrow().as_slice(), &[("2".into(), 0)]);
+
+        ui.set_page(4);
+        let weak = ui.as_weak();
+        ui.on_eq_level(move |gain| weak.unwrap().set_eq_preamp(gain));
+        let preamp = ElementQuery::from_root(&ui)
+            .match_accessible_label("Preamp gain")
+            .find_first()
+            .expect("preamp slider in Playback settings");
+        let start = preamp.absolute_position();
+        let size = preamp.size();
+        for (fraction, expected) in [(0.25, -6.0), (0.75, 6.0)] {
+            let position =
+                LogicalPosition::new(start.x + size.width * fraction, start.y + size.height / 2.0);
+            drag(ui.window(), position, 0.0);
+            assert_eq!(ui.get_eq_preamp(), expected);
+        }
     }
 }

@@ -26,6 +26,12 @@ component Label inherits Text {
     overflow: elide;
 }
 
+component Artwork inherits Image {
+    x: 0px;
+    y: 0px;
+    image-fit: contain;
+}
+
 component Action inherits Rectangle {
     in property <string> label;
     in property <bool> active;
@@ -101,6 +107,7 @@ component PlayerRange inherits Rectangle {
             if event.kind == PointerEventKind.down {
                 root.preview = clamp(self.mouse-x / root.width, 0, 1) * root.maximum;
                 focus.focus();
+                if root.updates-live { root.committed(root.preview); }
             }
             if event.kind == PointerEventKind.up {
                 root.committed(clamp(self.mouse-x / root.width, 0, 1) * root.maximum);
@@ -108,6 +115,7 @@ component PlayerRange inherits Rectangle {
         }
     }
     focus := FocusScope {
+        focus-on-click: false;
         key-pressed(event) => {
             if event.text == Key.LeftArrow {
                 root.committed(max(0, root.value - root.maximum * 0.05));
@@ -409,7 +417,7 @@ export component Sonic inherits Window {
                         background: Palette.background;
                         border-radius: 8px;
                         clip: true;
-                        Image { source: root.selected-art; image-fit: cover; }
+                        Artwork { width: parent.width; height: parent.height; source: root.selected-art; }
                         Action { x: parent.width - self.width - 6px; y: 6px; label: "×"; width: 26px; height: 22px; clicked => { root.close-album(); } }
                     }
                     Label { text: root.album-title; height: 17px; font-size: 13px; font-weight: 600; }
@@ -579,7 +587,7 @@ export component Sonic inherits Window {
                                         padding-left: 12px; padding-right: 12px; spacing: 12px;
                                         Rectangle {
                                             width: 40px; height: 40px; border-radius: 8px; clip: true; background: Palette.background;
-                                            Image { source: hit.art; image-fit: cover; }
+                                            Artwork { width: parent.width; height: parent.height; source: hit.art; }
                                         }
                                         Label { text: hit.number + ""; width: 20px; font-size: 12px; color: Palette.muted; }
                                         VerticalLayout {
@@ -633,7 +641,7 @@ export component Sonic inherits Window {
                                 background: Palette.surface;
                                 border-radius: 12px;
                                 clip: true;
-                                Image { x: 0; y: 0; width: parent.width; height: parent.height; source: album.art; image-fit: cover; }
+                                Artwork { width: parent.width; height: parent.height; source: album.art; }
                                 Rectangle {
                                     x: 0; y: 0; width: parent.width; height: parent.height;
                                     border-radius: 12px;
@@ -654,7 +662,7 @@ export component Sonic inherits Window {
                             spacing: 12px;
                             Rectangle {
                                 width: 47px; border-radius: 8px; clip: true; background: Palette.background;
-                                Image { x: 0; y: 0; width: parent.width; height: parent.height; source: album.art; image-fit: cover; }
+                                Artwork { width: parent.width; height: parent.height; source: album.art; }
                             }
                             Label { text: album.title; horizontal-stretch: 2; font-weight: 600; }
                             Label { text: album.artist; horizontal-stretch: 1; color: Palette.muted; }
@@ -703,10 +711,11 @@ export component Sonic inherits Window {
                 }
                 if root.current-track >= 0: Rectangle {
                     x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
-                    width: min(480px, parent.width - 48px, parent.height - 48px);
+                    width: max(0px, min(480px, parent.width - 64px, parent.height - 64px));
                     height: self.width;
-                    background: Palette.surface; border-radius: 16px; clip: true;
-                    Image { source: root.playing-art; image-fit: cover; }
+                    background: Palette.surface; border-radius: 16px;
+                    drop-shadow-color: #00000080; drop-shadow-blur: 28px; drop-shadow-offset-y: 16px;
+                    Rectangle { border-radius: 16px; clip: true; Artwork { width: parent.width; height: parent.height; source: root.playing-art; } }
                 }
                 if root.current-track < 0: VerticalLayout {
                     alignment: center;
@@ -735,7 +744,7 @@ export component Sonic inherits Window {
                             padding-bottom: 9px; spacing: 12px;
                             Rectangle {
                                 width: 48px; height: 48px; border-radius: 9px; clip: true; background: Palette.surface;
-                                Image { source: line.track.art; image-fit: cover; }
+                                Artwork { width: parent.width; height: parent.height; source: line.track.art; }
                             }
                             VerticalLayout {
                                 alignment: center; spacing: 3px;
@@ -754,7 +763,7 @@ export component Sonic inherits Window {
                                 padding-left: line.grouped ? 10px : 3px; padding-right: 7px; spacing: 8px;
                                 if !line.grouped: Rectangle {
                                     width: 38px; height: 38px; border-radius: 6px; clip: true; background: Palette.surface;
-                                    Image { source: line.track.art; image-fit: cover; }
+                                    Artwork { width: parent.width; height: parent.height; source: line.track.art; }
                                 }
                                 ReorderGrip {
                                     index: line.index; first: max(0, root.current-track); last: root.queue.length - 1;
@@ -815,7 +824,7 @@ export component Sonic inherits Window {
                                 spacing: 4px;
                                 Rectangle {
                                     border-radius: 12px; background: Palette.surface; height: parent.width; clip: true;
-                                    if card.has-art: Image { source: card.artwork; image-fit: cover; }
+                                    if card.has-art: Artwork { width: parent.width; height: parent.height; source: card.artwork; }
                                     if !card.has-art: Label { text: "♪"; font-size: 48px; horizontal-alignment: center; opacity: 0.4; }
                                 }
                                 Label { text: card.name; font-size: 14px; font-weight: 600; height: 18px; }
@@ -847,7 +856,7 @@ export component Sonic inherits Window {
                     spacing: 17px; height: 146px;
                     Rectangle {
                         width: 146px; height: 146px; border-radius: 14px; background: Palette.surface; clip: true;
-                        if root.playlist-has-art: Image { source: root.playlist-cover; image-fit: cover; }
+                        if root.playlist-has-art: Artwork { width: parent.width; height: parent.height; source: root.playlist-cover; }
                         if !root.playlist-has-art: Label { text: "♪"; font-size: 48px; horizontal-alignment: center; opacity: 0.4; }
                         TouchArea { mouse-cursor: pointer; clicked => { if root.editing-playlist { root.choose-playlist-cover(); } } }
                     }
@@ -887,7 +896,7 @@ export component Sonic inherits Window {
                                 spacing: 6px;
                                 Rectangle {
                                     width: 41px; height: 41px; border-radius: 8px; clip: true; background: Palette.background;
-                                    Image { source: row.art; image-fit: cover; }
+                                    Artwork { width: parent.width; height: parent.height; source: row.art; }
                                 }
                                 Rectangle {
                                     horizontal-stretch: 1;
@@ -933,7 +942,7 @@ export component Sonic inherits Window {
                             Action { width: 22px; height: 22px; label: root.normalizer-enabled ? "✓" : ""; active: root.normalizer-enabled; clicked => { root.toggle-normalizer(); } }
                             Label { text: "Loudness normalizer"; height: 22px; }
                         }
-                        Label { text: "Reduces volume differences between tracks so quiet songs and loud songs play at a more even level."; height: 22px; color: Palette.muted; font-size: 13px; }
+                        Text { text: "The normalizer compresses peaks and can soften the effect of a preamp boost."; wrap: word-wrap; color: Palette.muted; font-size: 13px; }
                         Label { text: "Preset or adjust each band (dB). Applied to playback."; height: 26px; color: Palette.muted; font-size: 13px; }
                         Rectangle {
                             height: 96px;
@@ -958,7 +967,12 @@ export component Sonic inherits Window {
                         HorizontalLayout {
                             spacing: 12px; alignment: start;
                             Label { text: "Preamp"; width: 80px; color: Palette.muted; font-size: 13px; }
-                            Slider { width: 120px; minimum: -12; maximum: 12; step: 1; value: root.eq-preamp; changed(value) => { root.eq-level(value); } }
+                            PlayerRange {
+                                width: 170px; height: 32px;
+                                label: "Preamp gain"; maximum: 24; value: root.eq-preamp + 12;
+                                updates-live: true;
+                                committed(value) => { root.eq-level(round(value) - 12); }
+                            }
                             Label { text: (root.eq-preamp > 0 ? "+" : "") + root.eq-preamp + " dB"; width: 60px; color: Palette.muted; font-size: 13px; }
                         }
                         HorizontalLayout {
@@ -966,7 +980,10 @@ export component Sonic inherits Window {
                             Label { text: "Preset"; width: 80px; color: Palette.muted; font-size: 13px; }
                             ComboBox { model: ["Flat", "Bass boost", "Treble boost", "Rock", "Jazz", "Classical", "Custom"]; width: 140px; current-index <=> root.eq-preset-index; selected => { root.eq-preset(self.current-index); } }
                         }
-                        HorizontalLayout {
+                        ScrollView {
+                            min-width: 0px; height: 155px;
+                            content-width: max(self.visible-width, 580px);
+                            HorizontalLayout {
                             spacing: 1px;
                             for gain[index] in root.eq-gains: VerticalLayout {
                                 spacing: 7px;
@@ -976,6 +993,7 @@ export component Sonic inherits Window {
                                     text: ["25","35","49","69","97","137","192","270","380","534","750","1.1k","1.5k","2.1k","2.9k","4.1k","5.8k","8.1k","11.4k","16.0k"][index];
                                     horizontal-alignment: center; font-size: 11px; height: 18px; color: Palette.muted;
                                 }
+                            }
                             }
                         }
                     }
@@ -990,7 +1008,7 @@ export component Sonic inherits Window {
                     }
                     if root.settings-tab == 1: SettingsCard {
                         Label { text: "Theme"; font-weight: 700; font-size: 16px; height: 23px; }
-                        Label { text: "Pick a color for backgrounds and accents. Text stays the same for readability."; height: 23px; color: Palette.muted; font-size: 13px; }
+                        Text { text: "Pick a color for backgrounds and accents."; wrap: word-wrap; color: Palette.muted; font-size: 13px; }
                         HorizontalLayout {
                             spacing: 8px; alignment: start;
                             Label { text: "Theme seed"; width: 100px; color: Palette.muted; }
@@ -1061,7 +1079,7 @@ export component Sonic inherits Window {
                     }
                     if root.settings-tab == 2: SettingsCard {
                         Label { text: "Cache"; font-size: 16px; font-weight: 700; height: 23px; }
-                        Label { text: "Clear API and image caches. Use if library or artwork is stale."; height: 22px; color: Palette.muted; }
+                        Text { text: "Clear API and image caches. Use if library or artwork is stale."; wrap: word-wrap; color: Palette.muted; }
                         HorizontalLayout {
                             alignment: start; spacing: 12px;
                             Action { width: 105px; label: "Reset cache"; clicked => { root.reset-art(); } }
@@ -1077,12 +1095,12 @@ export component Sonic inherits Window {
                         HorizontalLayout {
                             spacing: 8px; alignment: start;
                             Label { text: "Application ID"; width: 108px; }
-                            LineEdit { text <=> root.discord-id; width: 235px; placeholder-text: "e.g. 1234567890123456789"; }
+                            LineEdit { text <=> root.discord-id; min-width: 0px; max-width: 235px; horizontal-stretch: 1; placeholder-text: "e.g. 1234567890123456789"; }
                         }
                         HorizontalLayout {
                             spacing: 8px; alignment: start;
                             Label { text: "Image key"; width: 108px; }
-                            LineEdit { text <=> root.discord-image; width: 235px; placeholder-text: "Optional"; }
+                            LineEdit { text <=> root.discord-image; min-width: 0px; max-width: 235px; horizontal-stretch: 1; placeholder-text: "Optional"; }
                         }
                         Action { width: 114px; label: "Test connection"; clicked => { root.discord-test(); } }
                         if root.discord-status != "": Label { text: root.discord-status; height: 22px; color: Palette.muted; }
@@ -1092,8 +1110,8 @@ export component Sonic inherits Window {
                     Label { text: root.lastfm-status; color: Palette.muted; height: 24px; }
                     if !root.lastfm-connected: HorizontalLayout {
                         spacing: 6px;
-                        fm-key := LineEdit { placeholder-text: "Last.fm API key"; width: 168px; }
-                        fm-secret := LineEdit { placeholder-text: "API secret"; input-type: password; width: 168px; }
+                        fm-key := LineEdit { placeholder-text: "Last.fm API key"; min-width: 0px; horizontal-stretch: 1; }
+                        fm-secret := LineEdit { placeholder-text: "API secret"; input-type: password; min-width: 0px; horizontal-stretch: 1; }
                         Action { width: 100px; label: "Connect"; clicked => { root.connect-lastfm(fm-key.text, fm-secret.text); fm-secret.text = ""; } }
                     }
                     if root.lastfm-pending: Action { label: "Finish Last.fm sign-in"; clicked => { root.approve-lastfm(); } }
@@ -1118,7 +1136,7 @@ export component Sonic inherits Window {
                     x: 16px; y: 9px;
                     width: 72px; height: 72px;
                     background: Palette.surface; border-radius: 6px; clip: true;
-                    Image { source: root.playing-art; image-fit: cover; }
+                    Artwork { width: parent.width; height: parent.height; source: root.playing-art; }
                 }
                 if footer.show-meta: VerticalLayout {
                     x: 98px; y: 0px; width: max(70px, parent.width / 2 - 225px);
