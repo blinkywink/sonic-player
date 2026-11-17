@@ -188,7 +188,7 @@ impl<S: Source> Iterator for Equalizer<S> {
             self.remaining = 256;
         }
         self.remaining -= 1;
-        let mut sample = self.inner.next()? * self.preamp;
+        let mut sample = self.inner.next()?;
         for (filter, delay) in self.filters.iter().zip(&mut self.delays[self.channel]) {
             if let Some(filter) = filter {
                 sample = filter.process(sample, delay);
@@ -225,7 +225,8 @@ impl<S: Source> Iterator for Equalizer<S> {
                 self.peak = 0.0;
             }
         }
-        Some(sample)
+        // Apply the user gain after normalization so compression can't undo it.
+        Some(sample * self.preamp)
     }
 }
 
@@ -270,15 +271,19 @@ mod tests {
 
     #[test]
     fn preamp_changes_amplitude() {
-        let settings = Arc::new(Settings::default());
-        let source = SamplesBuffer::new(1, 48_000, vec![0.2; 768]);
-        let mut playing = Equalizer::new(source, settings.clone());
-        assert_eq!(playing.next(), Some(0.2));
-        settings.set_preamp(-6.0);
-        let quieter = playing.nth(255).unwrap();
-        assert!((quieter - 0.10024).abs() < 0.0001);
-        settings.set_preamp(6.0);
-        let louder = playing.nth(255).unwrap();
-        assert!((louder - 0.39905).abs() < 0.0001);
+        for normalize in [false, true] {
+            let settings = Arc::new(Settings::default());
+            settings.set_normalizer(normalize);
+            let source = SamplesBuffer::new(1, 48_000, vec![0.2; 50_000]);
+            let mut playing = Equalizer::new(source, settings.clone());
+            // Let the compressor settle before comparing the same signal at each gain.
+            let baseline = playing.nth(47_999).unwrap();
+            settings.set_preamp(-6.0);
+            let quieter = playing.nth(255).unwrap();
+            assert!((quieter / baseline - 10.0_f32.powf(-6.0 / 20.0)).abs() < 0.001);
+            settings.set_preamp(6.0);
+            let louder = playing.nth(255).unwrap();
+            assert!((louder / baseline - 10.0_f32.powf(6.0 / 20.0)).abs() < 0.001);
+        }
     }
 }

@@ -1,7 +1,7 @@
 import { ComboBox, LineEdit, ListView, ScrollView, Slider } from "std-widgets.slint";
 
 export struct Album { key: string, title: string, artist: string, year: string, art: image, }
-export struct AlbumRow { offset: int, count: int, heading: string, }
+export struct AlbumRow { offset: int, count: int, heading: string, has-year: bool, }
 export struct Track { key: string, number: int, title: string, time: string, }
 export struct PlaylistCard { name: string, count: int, artwork: image, has-art: bool, }
 export struct QueueTrack { title: string, artist: string, album: string, album-key: string, time: string, number: int, art: image, }
@@ -377,7 +377,7 @@ export component Sonic inherits Window {
     callback seek(float);
     callback volume(float);
 
-    callback request-visible-art(float, float, float, int);
+    callback request-visible-art(float, float, float, float, int);
 
     HorizontalLayout {
         spacing: 0px;
@@ -623,16 +623,18 @@ export component Sonic inherits Window {
                     property <length> gap: 16px;
                     property <int> columns: root.list-mode ? 1 : max(1, floor((self.visible-width + self.gap) / (160px + self.gap)));
                     property <length> cover-size: max(1px, (self.visible-width - (self.columns - 1) * self.gap) / self.columns);
-                    property <length> row-height: root.list-mode ? 62px : self.cover-size + 66px;
+                    property <length> row-height: root.list-mode ? 68px : self.cover-size + 55px;
+                    property <length> year-height: root.list-mode ? 0px : 13px;
                     for row in root.album-rows: Rectangle {
-                      height: grid.row-height + (row.heading == "" ? 0px : 27px);
-                      if row.heading != "": Label { y: 0px; height: 23px; text: row.heading; font-size: 14px; font-weight: 600; color: Palette.muted; }
+                      height: self.cards-height + (row.heading == "" ? 0px : 27px);
+                      property <length> cards-height: grid.row-height + (row.has-year ? grid.year-height : 0px);
+                      if row.heading != "": Label { x: 0px; y: 0px; height: 23px; text: row.heading; font-size: 11px; font-weight: 600; color: Palette.muted; }
                       for column in row.count: Rectangle {
                         property <Album> album: root.albums[row.offset + column];
                         x: column * (grid.cover-size + grid.gap);
                         y: row.heading == "" ? 0px : 27px;
                         width: grid.cover-size;
-                        height: grid.row-height - (root.list-mode ? 5px : grid.gap);
+                        height: parent.cards-height - (root.list-mode ? 4px : grid.gap);
                         border-radius: 10px;
                         background: root.list-mode ? (root.selected-key == album.key ? Palette.selected : tile.has-hover ? Palette.hover : Palette.surface) : transparent;
                         if !root.list-mode: VerticalLayout {
@@ -645,7 +647,7 @@ export component Sonic inherits Window {
                                 Rectangle {
                                     x: 0; y: 0; width: parent.width; height: parent.height;
                                     border-radius: 12px;
-                                    border-color: root.selected-key == album.key ? Palette.accent : tile.has-hover ? Palette.muted : transparent;
+                                    border-color: root.selected-key == album.key ? Palette.accent : transparent;
                                     border-width: root.selected-key == album.key ? 3px : 1px;
                                     animate border-color { duration: 120ms; easing: ease-out; }
                                 }
@@ -654,19 +656,22 @@ export component Sonic inherits Window {
                                 padding-top: 8px; padding-left: 2px; padding-right: 2px; spacing: 1px;
                                 Label { text: album.title; font-weight: 600; font-size: 13px; height: 16px; }
                                 Label { text: album.artist == "" ? "—" : album.artist; color: Palette.muted; font-size: 12px; height: 14px; }
-                                Label { text: album.year; color: Palette.muted; font-size: 11px; height: 12px; }
+                                if album.year != "": Label { text: album.year; color: Palette.muted; font-size: 11px; height: 12px; opacity: 0.8; }
                             }
                         }
                         if root.list-mode: HorizontalLayout {
-                            padding-left: 12px; padding-right: 12px; padding-top: 5px; padding-bottom: 5px;
+                            padding-left: 12px; padding-right: 12px; padding-top: 8px; padding-bottom: 8px;
                             spacing: 12px;
                             Rectangle {
-                                width: 47px; border-radius: 8px; clip: true; background: Palette.background;
+                                width: 48px; border-radius: 8px; clip: true; background: Palette.background;
                                 Artwork { width: parent.width; height: parent.height; source: album.art; }
                             }
-                            Label { text: album.title; horizontal-stretch: 2; font-weight: 600; }
-                            Label { text: album.artist; horizontal-stretch: 1; color: Palette.muted; }
-                            Label { text: album.year; width: 48px; color: Palette.muted; }
+                            VerticalLayout {
+                                horizontal-stretch: 1; alignment: center; spacing: 2px;
+                                Label { text: album.title; height: 17px; font-weight: 600; }
+                                Label { text: album.artist == "" ? "—" : album.artist; height: 15px; font-size: 12px; color: Palette.muted; }
+                            }
+                            if album.year != "": Label { text: album.year; width: 36px; font-size: 12px; color: Palette.muted; }
                         }
                         accessible-role: button;
                         accessible-label: album.title;
@@ -697,7 +702,7 @@ export component Sonic inherits Window {
                 Timer {
                     interval: 180ms;
                     running: root.connected || root.local-enabled;
-                    triggered => { root.request-visible-art(-grid.content-y / 1px, grid.visible-height / 1px, grid.row-height / 1px, grid.columns); }
+                    triggered => { root.request-visible-art(-grid.content-y / 1px, grid.visible-height / 1px, grid.row-height / 1px, grid.year-height / 1px, grid.columns); }
                 }
             }
             if root.page == 1: Rectangle {
@@ -942,7 +947,7 @@ export component Sonic inherits Window {
                             Action { width: 22px; height: 22px; label: root.normalizer-enabled ? "✓" : ""; active: root.normalizer-enabled; clicked => { root.toggle-normalizer(); } }
                             Label { text: "Loudness normalizer"; height: 22px; }
                         }
-                        Text { text: "The normalizer compresses peaks and can soften the effect of a preamp boost."; wrap: word-wrap; color: Palette.muted; font-size: 13px; }
+                        Text { text: "The normalizer evens out loudness. Preamp adjusts the output level."; wrap: word-wrap; color: Palette.muted; font-size: 13px; }
                         Label { text: "Preset or adjust each band (dB). Applied to playback."; height: 26px; color: Palette.muted; font-size: 13px; }
                         Rectangle {
                             height: 96px;

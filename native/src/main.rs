@@ -332,11 +332,15 @@ impl State {
                 end += 1;
             }
             for start in (offset..end).step_by(self.album_columns) {
+                let row_end = end.min(start + self.album_columns);
                 rows.push(AlbumRow {
                     offset: start as i32,
-                    count: (end - start).min(self.album_columns) as i32,
+                    count: (row_end - start) as i32,
+                    has_year: self.visible[start..row_end]
+                        .iter()
+                        .any(|&index| self.albums[index].year > 0),
                     heading: if start == offset {
-                        label.as_str().into()
+                        label.to_uppercase().into()
                     } else {
                         "".into()
                     },
@@ -2044,7 +2048,7 @@ fn main() -> Result<()> {
     });
     ui.on_request_visible_art({
         let (state, tx) = (state.clone(), tx.clone());
-        move |top, height, row_height, columns| {
+        move |top, height, row_height, year_height, columns| {
             let mut state = state.borrow_mut();
             let plex = state.plex.clone();
             let columns = columns.max(1) as usize;
@@ -2056,7 +2060,10 @@ fn main() -> Result<()> {
             let mut y = 0.0;
             let mut visible = Vec::new();
             for row in state.album_rows.iter() {
-                let next = y + row_height + if row.heading.is_empty() { 0.0 } else { 27.0 };
+                let next = y
+                    + row_height
+                    + if row.has_year { year_height } else { 0.0 }
+                    + if row.heading.is_empty() { 0.0 } else { 27.0 };
                 if next >= top && y <= top + height + row_height {
                     visible.extend(row.offset as usize..(row.offset + row.count) as usize);
                 }
@@ -3241,6 +3248,7 @@ mod drag_tests {
                     .map(|offset| AlbumRow {
                         offset,
                         count: columns.min(6 - offset),
+                        has_year: false,
                         heading: "".into(),
                     })
                     .collect::<Vec<_>>(),
@@ -3248,7 +3256,7 @@ mod drag_tests {
         };
         set_rows(&ui, 2);
         let weak = ui.as_weak();
-        ui.on_request_visible_art(move |_, _, _, columns| {
+        ui.on_request_visible_art(move |_, _, _, _, columns| {
             if let Some(ui) = weak.upgrade() {
                 set_rows(&ui, columns);
             }
