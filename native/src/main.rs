@@ -3598,12 +3598,18 @@ fn main() -> Result<()> {
         ui.show()?;
         desktop::Tray::attach(&ui)
     };
+    #[cfg(windows)]
+    let mut window_icons_set = false;
     timer.start(TimerMode::Repeated, Duration::from_millis(120), move || {
         #[cfg(windows)]
         if let Some(tray) = &tray {
             instance.activate_if_requested(tray);
         }
         let Some(ui) = weak.upgrade() else { return };
+        #[cfg(windows)]
+        if !window_icons_set {
+            window_icons_set = desktop::set_window_icons(&ui);
+        }
         let mut state = state.borrow_mut();
         let now = Instant::now();
         if now.duration_since(state.last_save) >= Duration::from_secs(2) {

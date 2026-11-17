@@ -59,7 +59,6 @@ impl Drop for Instance {
 pub struct Tray {
     data: NOTIFYICONDATAW,
     custom_icon: bool,
-    window_icons: [HICON; 2],
 }
 
 impl Tray {
@@ -101,18 +100,30 @@ impl Tray {
                 }
                 return None;
             }
-            // The taskbar and Alt+Tab use the window's big icon; without one Windows
-            // shows its cached copy of the .exe icon, which can be stale after an update.
-            let big = app_icon(GetSystemMetrics(SM_CXICON));
-            let small = app_icon(GetSystemMetrics(SM_CXSMICON));
-            for (kind, icon) in [(ICON_BIG, big), (ICON_SMALL, small)] {
-                if !icon.is_null() {
-                    SendMessageW(hwnd, WM_SETICON, kind as usize, icon as isize);
-                }
-            }
-            Some(Self { data, custom_icon, window_icons: [big, small] })
+            Some(Self { data, custom_icon })
         }
     }
+}
+
+/// Sets the window's big and small icons. The taskbar and Alt+Tab use the big one;
+/// without it Windows shows its cached copy of the .exe icon, which can be stale after
+/// an update. Returns false until the native window exists, so the caller can retry.
+pub fn set_window_icons(ui: &crate::Sonic) -> bool {
+    let handle = ui.window().window_handle();
+    let Some(RawWindowHandle::Win32(handle)) = handle.window_handle().ok().map(|h| h.as_raw()) else {
+        return false;
+    };
+    let hwnd = handle.hwnd.get() as HWND;
+    unsafe {
+        for (kind, metric) in [(ICON_BIG, SM_CXICON), (ICON_SMALL, SM_CXSMICON)] {
+            let icon = app_icon(GetSystemMetrics(metric));
+            if !icon.is_null() {
+                // The window keeps these for its lifetime; Windows frees them on exit.
+                SendMessageW(hwnd, WM_SETICON, kind as usize, icon as isize);
+            }
+        }
+    }
+    true
 }
 
 /// Sonic's icon at `size` pixels, from the embedded .ico (null if it can't be made).
@@ -140,11 +151,6 @@ impl Drop for Tray {
             Shell_NotifyIconW(NIM_DELETE, &self.data);
             if self.custom_icon {
                 DestroyIcon(self.data.hIcon);
-            }
-            for icon in self.window_icons {
-                if !icon.is_null() {
-                    DestroyIcon(icon);
-                }
             }
         }
     }
