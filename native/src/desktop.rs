@@ -59,6 +59,7 @@ impl Drop for Instance {
 pub struct Tray {
     data: NOTIFYICONDATAW,
     custom_icon: bool,
+    window_icons: [HICON; 2],
 }
 
 impl Tray {
@@ -80,20 +81,7 @@ impl Tray {
             *to = from;
         }
         unsafe {
-            let icon = include_bytes!("../assets/icon.ico");
-            let custom = ico_image(icon)
-                .map(|bytes| {
-                    CreateIconFromResourceEx(
-                        bytes.as_ptr(),
-                        bytes.len() as u32,
-                        1,
-                        0x0003_0000,
-                        32,
-                        32,
-                        LR_DEFAULTCOLOR,
-                    )
-                })
-                .unwrap_or(null_mut());
+            let custom = app_icon(32);
             let custom_icon = !custom.is_null();
             data.hIcon = if custom_icon {
                 custom
@@ -113,9 +101,36 @@ impl Tray {
                 }
                 return None;
             }
-            Some(Self { data, custom_icon })
+            // The taskbar and Alt+Tab use the window's big icon; without one Windows
+            // shows its cached copy of the .exe icon, which can be stale after an update.
+            let big = app_icon(GetSystemMetrics(SM_CXICON));
+            let small = app_icon(GetSystemMetrics(SM_CXSMICON));
+            for (kind, icon) in [(ICON_BIG, big), (ICON_SMALL, small)] {
+                if !icon.is_null() {
+                    SendMessageW(hwnd, WM_SETICON, kind as usize, icon as isize);
+                }
+            }
+            Some(Self { data, custom_icon, window_icons: [big, small] })
         }
     }
+}
+
+/// Sonic's icon at `size` pixels, from the embedded .ico (null if it can't be made).
+unsafe fn app_icon(size: i32) -> HICON {
+    let icon = include_bytes!("../assets/icon.ico");
+    ico_image(icon, size)
+        .map(|bytes| unsafe {
+            CreateIconFromResourceEx(
+                bytes.as_ptr(),
+                bytes.len() as u32,
+                1,
+                0x0003_0000,
+                size,
+                size,
+                LR_DEFAULTCOLOR,
+            )
+        })
+        .unwrap_or(null_mut())
 }
 
 impl Drop for Tray {
@@ -125,6 +140,11 @@ impl Drop for Tray {
             Shell_NotifyIconW(NIM_DELETE, &self.data);
             if self.custom_icon {
                 DestroyIcon(self.data.hIcon);
+            }
+            for icon in self.window_icons {
+                if !icon.is_null() {
+                    DestroyIcon(icon);
+                }
             }
         }
     }
@@ -258,7 +278,7 @@ unsafe fn set_startup(enabled: bool) -> io::Result<()> {
     }
 }
 
-fn ico_image(file: &[u8]) -> Option<&[u8]> {
+fn ico_image(file: &[u8], target: i32) -> Option<&[u8]> {
     let count = u16::from_le_bytes(file.get(4..6)?.try_into().ok()?) as usize;
     let directory = file.get(6..6 + count * 16)?;
     let entry = directory.chunks_exact(16).min_by_key(|entry| {
@@ -267,7 +287,8 @@ fn ico_image(file: &[u8]) -> Option<&[u8]> {
         } else {
             i32::from(entry[0])
         };
-        (width - 32).abs()
+        // Prefer the closest size, and a larger one over a smaller one on ties.
+        ((width - target).abs(), width < target)
     })?;
     let size = u32::from_le_bytes(entry[8..12].try_into().ok()?) as usize;
     let offset = u32::from_le_bytes(entry[12..16].try_into().ok()?) as usize;
