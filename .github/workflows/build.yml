@@ -1,7 +1,8 @@
 name: Build Sonic
 
-# Every push builds and tests Windows, Linux and macOS. Pushing a tag such as
-# v0.2.0 also publishes a GitHub Release with all three downloads attached.
+# Every push builds and tests Windows, Linux, macOS and the iPhone app. Pushing a
+# tag such as v0.3.0 also publishes a GitHub Release with every download attached;
+# installed Windows copies update themselves from the latest release.
 on:
   push:
     branches: [main]
@@ -28,10 +29,14 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
           Compress-Archive -Path native/target/release/sonicplayer.exe -DestinationPath dist/sonicplayer-windows-x64.zip
+          # The bare exe is what installed copies download to update themselves.
+          Copy-Item native/target/release/sonicplayer.exe dist/sonicplayer-windows-x64.exe
       - uses: actions/upload-artifact@v4
         with:
           name: sonicplayer-windows-x64
-          path: dist/sonicplayer-windows-x64.zip
+          path: |
+            dist/sonicplayer-windows-x64.zip
+            dist/sonicplayer-windows-x64.exe
           if-no-files-found: error
 
   linux:

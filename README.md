@@ -16,7 +16,7 @@ A native Plex and local music player built with Rust, Slint, and Rodio. Browse a
 
 ## Run on Windows
 
-Download `sonicplayer-windows-x64.zip` from the [latest release](https://github.com/blinkywink/sonic-player/releases/latest), extract it, and run `sonicplayer.exe`.
+Download `sonicplayer-windows-x64.zip` from the [latest release](https://github.com/blinkywink/sonic-player/releases/latest), extract it, and run `sonicplayer.exe`. After that it keeps itself up to date: it checks for new releases in the background and the new version runs the next time you open Sonic.
 
 - **Plex:** Open **Settings → Library → Sign in with Plex**, approve Sonic in your browser, then return to the app. If your server has several music libraries, choose which ones to show under the Plex account.
 - **Local music:** Enable local files in **Settings → Library**, put music in the `SonicMusic` folder, and refresh. You can also pass audio file paths when launching Sonic.
@@ -55,11 +55,11 @@ The [previous Electron client](https://github.com/blinkywink/sonic-player/tree/8
 
 ## Releases
 
-Every push to `main` builds and tests Windows, Linux and macOS ([workflow](https://github.com/blinkywink/sonic-player/actions/workflows/build.yml)). To publish a release, bump `version` in `native/Cargo.toml`, commit, then push a matching tag:
+Every push to `main` builds and tests Windows, Linux, macOS and the iPhone app ([workflow](https://github.com/blinkywink/sonic-player/actions/workflows/build.yml)). To publish a release, bump `version` in `native/Cargo.toml`, commit, then push a matching tag:
 
 ```sh
 git tag v0.2.0
 git push origin v0.2.0
 ```
 
-The workflow checks the tag matches the version and attaches the three downloads to a new GitHub Release.
+The workflow checks the tag matches the version and attaches every download to a new GitHub Release. Installed Windows copies pick it up automatically.

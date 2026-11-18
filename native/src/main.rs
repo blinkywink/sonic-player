@@ -12,6 +12,7 @@ mod lyrics;
 mod media;
 mod plex;
 mod stream;
+mod update;
 
 use anyhow::{Context, Result};
 use library::{LibraryData, PlaybackSnapshot, Playlist, Preferences};
@@ -2416,6 +2417,7 @@ fn main() -> Result<()> {
     let Some(instance) = desktop::Instance::acquire()? else {
         return Ok(());
     };
+    update::start();
     let ui = Sonic::new()?;
     let (data, can_save) = match library::load() {
         Ok(data) => (data, true),
