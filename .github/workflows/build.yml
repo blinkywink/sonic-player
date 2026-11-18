@@ -95,9 +95,38 @@ jobs:
           path: dist/sonicplayer-macos-arm64.zip
           if-no-files-found: error
 
+  ios:
+    runs-on: macos-latest
+    env:
+      IPHONEOS_DEPLOYMENT_TARGET: "15.0"
+    steps:
+      - uses: actions/checkout@v5
+      - name: Update Rust stable and add the iOS target
+        run: |
+          rustup update stable --no-self-update
+          rustup target add aarch64-apple-ios
+      - name: Build
+        run: cargo build --release --locked --target aarch64-apple-ios --manifest-path mobile/Cargo.toml
+      - name: Package unsigned Sonic.ipa
+        # Unsigned: sideloading tools (AltStore, Sideloadly, etc.) sign it with your Apple ID.
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' mobile/Cargo.toml | head -1)
+          app=dist/Payload/Sonic.app
+          mkdir -p "$app"
+          cp mobile/target/aarch64-apple-ios/release/sonic-mobile "$app/"
+          sed "s/0\.2\.0/$version/" mobile/packaging/Info.plist > "$app/Info.plist"
+          cp mobile/assets/AppIcon60x60@2x.png mobile/assets/AppIcon60x60@3x.png "$app/"
+          printf 'APPL????' > "$app/PkgInfo"
+          (cd dist && zip -qry sonic-ios-unsigned.ipa Payload)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sonic-ios-unsigned
+          path: dist/sonic-ios-unsigned.ipa
+          if-no-files-found: error
+
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [windows, linux, macos]
+    needs: [windows, linux, macos, ios]
     runs-on: ubuntu-latest
     permissions:
       contents: write

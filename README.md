@@ -32,6 +32,14 @@ Linux and macOS downloads are on the same [releases page](https://github.com/bli
 - **macOS (Apple Silicon):** download `sonicplayer-macos-arm64.zip`, unzip, and move **Sonic.app** to Applications. The app isn't notarized, so the first time, right-click it and choose **Open**.
 - On both, closing the window quits Sonic (there's no tray yet), and the theme swatch doesn't open a color picker, so type a hex color instead.
 
+## iPhone (sideload, preview)
+
+A lean iPhone version lives in `mobile/`: your album grid, an album's songs, playback with a simple queue, a Now Playing tab with synced lyrics, and Plex settings (including which music libraries to show). It shares Sonic's Plex, streaming and lyrics code.
+
+Download `sonic-ios-unsigned.ipa` from the [latest release](https://github.com/blinkywink/sonic-player/releases/latest) (or the `sonic-ios-unsigned` build artifact) and install it with your sideloading tool, which signs it with your Apple ID. It's built on GitHub's macOS runners, so no Mac is needed. Sign in with Plex in the Settings tab; on your home network, allow Sonic's local network access so it can reach your server.
+
+To try the phone UI on a desktop: `cargo run --release --manifest-path mobile/Cargo.toml` (it opens a phone-sized window and shows your local music folder when you're not signed in).
+
 ## Build from source
 
 On Windows, install the Rust MSVC toolchain and Visual Studio C++ Build Tools with a Windows SDK. From the repository root:

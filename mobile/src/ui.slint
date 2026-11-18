@@ -1,0 +1,428 @@
+import { ListView } from "std-widgets.slint";
+
+export struct AlbumItem { key: string, title: string, artist: string, art: image, }
+export struct AlbumRow { first: int, count: int, }
+export struct TrackItem { number: string, title: string, time: string, current: bool, }
+export struct QueueItem { title: string, artist: string, art: image, current: bool, }
+export struct LibraryItem { title: string, selected: bool, }
+export struct LyricItem { text: string, time: float, y: float, height: float, }
+
+global Theme {
+    out property <color> background: #0f172a;
+    out property <color> surface: #18233c;
+    out property <color> raised: #1e2b49;
+    out property <color> text: #e8eef4;
+    out property <color> muted: #9ca8b8;
+    out property <color> accent: #2f5bc4;
+    out property <color> hairline: #e8eef41a;
+    out property <brush> glass: @linear-gradient(180deg, #1e2b49e6 0%, #18233cd9 100%);
+}
+
+component Label inherits Text {
+    color: Theme.text;
+    vertical-alignment: center;
+    overflow: elide;
+}
+
+component Icon inherits Image {
+    colorize: Theme.text;
+    width: 22px;
+    height: 22px;
+}
+
+// Big rounded button: filled (accent) or glass.
+component Pill inherits Rectangle {
+    in property <string> label;
+    in property <image> icon;
+    in property <bool> filled;
+    callback clicked;
+    height: 46px;
+    border-radius: 23px;
+    background: root.filled ? (hit.pressed ? Theme.accent.darker(0.15) : Theme.accent) : (hit.pressed ? Theme.raised.darker(0.1) : Theme.raised);
+    border-width: root.filled ? 0px : 1px;
+    border-color: Theme.hairline;
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-action-default => { root.clicked(); }
+    HorizontalLayout {
+        alignment: center; spacing: 8px;
+        Rectangle { width: 18px; Icon { width: 18px; height: 18px; source: root.icon; } }
+        Label { text: root.label; font-size: 16px; font-weight: 600; }
+    }
+    hit := TouchArea { clicked => { root.clicked(); } }
+}
+
+component RoundButton inherits Rectangle {
+    in property <image> icon;
+    in property <string> label;
+    in property <length> icon-size: 22px;
+    in property <bool> filled;
+    callback clicked;
+    border-radius: self.height / 2;
+    background: root.filled ? Theme.text : hit.pressed ? Theme.hairline : transparent;
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-action-default => { root.clicked(); }
+    Icon {
+        x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+        width: root.icon-size; height: root.icon-size; source: root.icon;
+        colorize: root.filled ? Theme.background : Theme.text;
+    }
+    hit := TouchArea { clicked => { root.clicked(); } }
+}
+
+component Cover inherits Rectangle {
+    in property <image> art;
+    in property <length> radius: 12px;
+    border-radius: root.radius;
+    background: Theme.raised;
+    clip: true;
+    Image { width: parent.width; height: parent.height; source: root.art; image-fit: cover; }
+}
+
+export component MobileApp inherits Window {
+    title: "Sonic";
+    background: Theme.background;
+    preferred-width: 390px;
+    preferred-height: 844px;
+    default-font-size: 15px;
+
+    // 0 Library, 1 Album, 2 Queue, 3 Settings
+    in-out property <int> screen;
+    in property <[AlbumItem]> albums;
+    in property <[AlbumRow]> album-rows;
+    in property <string> status: "Loading…";
+    in property <bool> signed-in;
+    in property <bool> connecting;
+    in property <[LibraryItem]> libraries;
+
+    in property <string> album-title;
+    in property <string> album-artist;
+    in property <image> album-art;
+    in property <[TrackItem]> tracks;
+    in property <bool> tracks-loading;
+
+    in property <[QueueItem]> queue;
+    in property <bool> playing;
+    in property <bool> has-track;
+    in property <string> now-title;
+    in property <string> now-artist;
+    in property <image> now-art;
+    in property <float> position;
+    in property <float> duration: 1;
+
+    in property <[LyricItem]> lyrics;
+    in property <bool> lyrics-synced;
+    in property <int> lyric-index: -1;
+    in property <string> lyrics-status;
+    callback lyrics-layout(int);
+    callback seek(float);
+    callback open-album(string);
+    callback request-art(int, int);
+    callback play-album(bool);
+    callback play-track(int);
+    callback play-queue(int);
+    callback remove-queue(int);
+    callback toggle-play;
+    callback next;
+    callback previous;
+    callback sign-in;
+    callback sign-out;
+    callback toggle-library(int);
+
+    property <length> top-inset: max(root.safe-area-insets.top, 12px);
+    property <length> bottom-inset: root.safe-area-insets.bottom;
+    property <length> tab-height: 56px + root.bottom-inset;
+    property <length> mini-height: root.has-track ? 72px : 0px;
+    property <length> content-bottom: root.tab-height + root.mini-height;
+
+    // ---- Library ----
+    if root.screen == 0: Rectangle {
+        y: 0; height: parent.height - root.content-bottom;
+        Label { x: 20px; y: root.top-inset; height: 64px; text: "Library"; font-size: 32px; font-weight: 800; }
+        if root.albums.length == 0: Text {
+            x: 20px; y: root.top-inset + 72px; width: parent.width - 40px;
+            text: root.status; wrap: word-wrap; color: Theme.muted; font-size: 15px;
+        }
+        grid := ListView {
+            y: root.top-inset + 64px; height: parent.height - root.top-inset - 64px;
+            property <length> gap: 14px;
+            property <length> side: 20px;
+            property <length> tile: (self.visible-width - 2 * self.side - self.gap) / 2;
+            property <length> row-height: self.tile + 52px;
+            for row in root.album-rows: Rectangle {
+                height: grid.row-height;
+                for column in row.count: Rectangle {
+                    property <AlbumItem> album: root.albums[row.first + column];
+                    x: grid.side + column * (grid.tile + grid.gap);
+                    width: grid.tile; height: grid.row-height;
+                    Cover { y: 0; width: grid.tile; height: grid.tile; art: album.art; radius: 14px; }
+                    Label { y: grid.tile + 8px; height: 19px; width: parent.width; text: album.title; font-size: 14px; font-weight: 600; }
+                    Label { y: grid.tile + 27px; height: 17px; width: parent.width; text: album.artist; font-size: 12px; color: Theme.muted; }
+                    accessible-role: button; accessible-label: album.title;
+                    accessible-action-default => { root.open-album(album.key); }
+                    TouchArea { clicked => { root.open-album(album.key); } }
+                }
+            }
+        }
+        // Ask for covers around what's on screen.
+        Timer {
+            interval: 250ms; running: true;
+            triggered => {
+                root.request-art(floor(max(0px, -grid.content-y) / grid.row-height), ceil(grid.visible-height / grid.row-height) + 2);
+            }
+        }
+    }
+
+    // ---- Album ----
+    if root.screen == 1: Rectangle {
+        y: 0; height: parent.height - root.content-bottom;
+        album-scroll := Flickable {
+            y: root.top-inset + 44px; height: parent.height - root.top-inset - 44px;
+            content-height: album-page.preferred-height;
+          album-page := VerticalLayout {
+            width: album-scroll.width;
+            Rectangle {
+                height: self.width - 80px + 150px;
+                Cover {
+                    x: 40px; y: 8px; width: parent.width - 80px; height: self.width;
+                    art: root.album-art; radius: 14px;
+                    drop-shadow-color: #00000066; drop-shadow-blur: 30px; drop-shadow-offset-y: 12px;
+                }
+                Label { x: 20px; y: parent.width - 80px + 24px; width: parent.width - 40px; height: 30px; text: root.album-title; font-size: 22px; font-weight: 800; horizontal-alignment: center; }
+                Label { x: 20px; y: parent.width - 80px + 54px; width: parent.width - 40px; height: 22px; text: root.album-artist; font-size: 16px; color: Theme.muted; horizontal-alignment: center; }
+                HorizontalLayout {
+                    x: 20px; y: parent.width - 80px + 88px; width: parent.width - 40px; height: 46px; spacing: 12px;
+                    Pill { label: "Play"; icon: @image-url("icons/play.svg"); filled: true; clicked => { root.play-album(false); } }
+                    Pill { label: "Shuffle"; icon: @image-url("icons/shuffle.svg"); clicked => { root.play-album(true); } }
+                }
+            }
+            if root.tracks-loading: Rectangle { height: 48px; Label { x: 20px; text: "Loading songs…"; color: Theme.muted; } }
+            for track[index] in root.tracks: Rectangle {
+                height: 52px;
+                background: track-hit.pressed ? Theme.surface : transparent;
+                Rectangle { x: 20px; y: parent.height - 1px; width: parent.width - 20px; height: 1px; background: Theme.hairline; }
+                HorizontalLayout {
+                    padding-left: 20px; padding-right: 20px; spacing: 14px;
+                    Label { width: 24px; text: track.number; font-size: 14px; color: track.current ? Theme.accent.brighter(0.6) : Theme.muted; }
+                    Label { horizontal-stretch: 1; text: track.title; font-size: 16px; color: track.current ? Theme.accent.brighter(0.6) : Theme.text; font-weight: track.current ? 600 : 400; }
+                    Label { text: track.time; font-size: 14px; color: Theme.muted; }
+                }
+                accessible-role: button; accessible-label: track.title;
+                accessible-action-default => { root.play-track(index); }
+                track-hit := TouchArea { clicked => { root.play-track(index); } }
+            }
+            Rectangle { height: 24px; }
+          }
+        }
+        // Back bar.
+        Rectangle {
+            y: root.top-inset; height: 44px;
+            HorizontalLayout {
+                padding-left: 8px; alignment: start;
+                back := Rectangle {
+                    width: 110px;
+                    HorizontalLayout {
+                        spacing: 2px; alignment: start;
+                        Rectangle { width: 26px; Icon { source: @image-url("icons/chevron-left.svg"); colorize: Theme.accent.brighter(0.6); } }
+                        Label { text: "Library"; font-size: 17px; color: Theme.accent.brighter(0.6); }
+                    }
+                    accessible-role: button; accessible-label: "Back to Library";
+                    accessible-action-default => { root.screen = 0; }
+                    TouchArea { clicked => { root.screen = 0; } }
+                }
+            }
+        }
+    }
+
+    // ---- Queue ----
+    if root.screen == 2: Rectangle {
+        y: 0; height: parent.height - root.content-bottom;
+        queue-scroll := Flickable {
+            y: root.top-inset; height: parent.height - root.top-inset;
+            content-height: queue-page.preferred-height;
+          queue-page := VerticalLayout {
+            width: queue-scroll.width;
+            Rectangle { height: 64px; Label { x: 20px; text: "Queue"; font-size: 32px; font-weight: 800; } }
+            if root.queue.length == 0: Rectangle { height: 60px; Label { x: 20px; text: "Nothing queued. Play an album to start."; color: Theme.muted; } }
+            for item[index] in root.queue: Rectangle {
+                height: 64px;
+                background: item.current ? Theme.surface : queue-hit.pressed ? Theme.surface : transparent;
+                HorizontalLayout {
+                    padding-left: 20px; padding-right: 8px; padding-top: 8px; padding-bottom: 8px; spacing: 12px;
+                    Cover { width: 48px; art: item.art; radius: 8px; }
+                    VerticalLayout {
+                        horizontal-stretch: 1; alignment: center; spacing: 2px;
+                        Label { text: item.title; font-size: 16px; font-weight: item.current ? 700 : 500; height: 21px; }
+                        Label { text: item.artist; font-size: 13px; color: Theme.muted; height: 17px; }
+                    }
+                    if !item.current: RoundButton {
+                        width: 44px; label: "Remove " + item.title; icon: @image-url("icons/close.svg"); icon-size: 16px;
+                        clicked => { root.remove-queue(index); }
+                    }
+                }
+                accessible-role: button; accessible-label: item.title;
+                accessible-action-default => { root.play-queue(index); }
+                queue-hit := TouchArea { width: parent.width - 52px; x: 0; clicked => { root.play-queue(index); } }
+            }
+            Rectangle { height: 24px; }
+          }
+        }
+    }
+
+    // ---- Settings ----
+    if root.screen == 3: Rectangle {
+        y: 0; height: parent.height - root.content-bottom;
+        settings-scroll := Flickable {
+            y: root.top-inset; height: parent.height - root.top-inset;
+            content-height: settings-page.preferred-height;
+          settings-page := VerticalLayout {
+            width: settings-scroll.width;
+            Rectangle { height: 64px; Label { x: 20px; text: "Settings"; font-size: 32px; font-weight: 800; } }
+            Rectangle {
+                height: 170px;
+                Rectangle {
+                    x: 16px; y: 0; width: parent.width - 32px; height: 156px;
+                    border-radius: 18px; background: Theme.glass; border-width: 1px; border-color: Theme.hairline;
+                    VerticalLayout {
+                        padding: 18px; spacing: 10px;
+                        Label { text: "Plex"; font-size: 18px; font-weight: 700; height: 24px; }
+                        Text { text: root.status; wrap: word-wrap; color: Theme.muted; font-size: 14px; vertical-stretch: 0; }
+                        Pill {
+                            label: root.signed-in ? "Sign out of Plex" : root.connecting ? "Connecting…" : "Sign in with Plex";
+                            filled: !root.signed-in;
+                            clicked => { if root.signed-in { root.sign-out(); } else if !root.connecting { root.sign-in(); } }
+                        }
+                    }
+                }
+            }
+            if root.signed-in && root.libraries.length > 1: VerticalLayout {
+              Rectangle { height: 34px; Label { x: 28px; text: "MUSIC LIBRARIES"; font-size: 12px; font-weight: 600; color: Theme.muted; } }
+              for library[index] in root.libraries: Rectangle {
+                height: 52px;
+                background: library-hit.pressed ? Theme.surface : transparent;
+                HorizontalLayout {
+                    padding-left: 28px; padding-right: 28px; spacing: 14px;
+                    Label { horizontal-stretch: 1; text: library.title; font-size: 16px; }
+                    Rectangle {
+                        width: 26px;
+                        Rectangle {
+                            width: 24px; height: 24px; border-radius: 12px;
+                            background: library.selected ? Theme.accent : transparent;
+                            border-width: library.selected ? 0px : 2px; border-color: Theme.muted;
+                            if library.selected: Text { text: "✓"; color: white; font-size: 14px; horizontal-alignment: center; vertical-alignment: center; }
+                        }
+                    }
+                }
+                accessible-role: checkbox; accessible-label: library.title; accessible-checked: library.selected;
+                accessible-action-default => { root.toggle-library(index); }
+                library-hit := TouchArea { clicked => { root.toggle-library(index); } }
+              }
+            }
+          }
+        }
+    }
+
+    // ---- Now Playing: lyrics only (the cover is in the mini player) ----
+    if root.screen == 4: Rectangle {
+        y: 0; height: parent.height - root.content-bottom;
+        Label { x: 20px; y: root.top-inset; height: 64px; text: "Now Playing"; font-size: 32px; font-weight: 800; }
+        if root.lyrics.length == 0: Text {
+            x: 20px; y: root.top-inset + 72px; width: parent.width - 40px;
+            text: !root.has-track ? "Play something to see its lyrics." : root.lyrics-status;
+            wrap: word-wrap; color: Theme.muted; font-size: 16px;
+        }
+        if root.lyrics.length > 0: lyrics-panel := Rectangle {
+            x: 24px; y: root.top-inset + 64px; width: parent.width - 48px; height: parent.height - root.top-inset - 64px;
+            clip: true;
+            property <int> wrap-chars: floor(self.width / 16px);
+            init => { root.lyrics-layout(self.wrap-chars); }
+            changed wrap-chars => { root.lyrics-layout(self.wrap-chars); }
+            property <length> total: (root.lyrics[root.lyrics.length - 1].y + root.lyrics[root.lyrics.length - 1].height) * 1px;
+            property <int> focus-row: max(0, root.lyric-index);
+            property <length> focus-y: (root.lyrics[self.focus-row].y + root.lyrics[self.focus-row].height / 2) * 1px;
+            pure function fade(center: length) -> float {
+                return clamp(1 - (abs(center - self.height / 2) - self.height * 0.18) / (self.height * 0.32), 0, 1);
+            }
+            if root.lyrics-synced: synced := Rectangle {
+                y: lyrics-panel.height * 0.45 - lyrics-panel.focus-y;
+                width: lyrics-panel.width; height: lyrics-panel.total;
+                animate y { duration: 420ms; easing: ease-out; }
+                for line[index] in root.lyrics: Rectangle {
+                    y: line.y * 1px; height: line.height * 1px; width: lyrics-panel.width;
+                    property <bool> sung: index == root.lyric-index;
+                    opacity: lyrics-panel.fade(synced.y + (line.y + line.height / 2) * 1px) * (self.sung ? 1 : 0.5);
+                    if line.text == "": Image {
+                        x: 0; y: (parent.height - self.height) / 2; width: 28px; height: 28px;
+                        source: @image-url("icons/music.svg"); colorize: Theme.text;
+                    }
+                    if line.text != "": Text {
+                        width: parent.width; height: parent.height; text: line.text;
+                        wrap: word-wrap; vertical-alignment: top; font-size: 26px; font-weight: 800;
+                        color: parent.sung ? Theme.text : Theme.muted;
+                    }
+                    if line.time >= 0: TouchArea { clicked => { root.seek(line.time); } }
+                }
+            }
+            if !root.lyrics-synced: Flickable {
+                content-height: lyrics-panel.total + 80px;
+                for line in root.lyrics: Text {
+                    y: line.y * 1px + 12px; height: line.height * 1px; width: lyrics-panel.width; text: line.text;
+                    wrap: word-wrap; vertical-alignment: top; font-size: 26px; font-weight: 800; color: Theme.text;
+                }
+            }
+        }
+    }
+
+    // ---- Mini player ----
+    if root.has-track: Rectangle {
+        x: 10px; width: parent.width - 20px; height: 64px;
+        y: parent.height - root.tab-height - self.height - 6px;
+        border-radius: 18px; background: Theme.glass; border-width: 1px; border-color: Theme.hairline;
+        drop-shadow-color: #00000066; drop-shadow-blur: 24px; drop-shadow-offset-y: 6px;
+        clip: true;
+        HorizontalLayout {
+            padding-left: 8px; padding-right: 6px; padding-top: 8px; padding-bottom: 8px; spacing: 10px;
+            Cover { width: 48px; art: root.now-art; radius: 8px; }
+            VerticalLayout {
+                horizontal-stretch: 1; alignment: center; spacing: 1px;
+                Label { text: root.now-title; font-size: 15px; font-weight: 600; height: 20px; }
+                Label { text: root.now-artist; font-size: 13px; color: Theme.muted; height: 17px; }
+            }
+            RoundButton { width: 40px; label: "Previous"; icon: @image-url("icons/prev.svg"); icon-size: 18px; clicked => { root.previous(); } }
+            RoundButton { width: 44px; label: root.playing ? "Pause" : "Play"; icon: root.playing ? @image-url("icons/pause.svg") : @image-url("icons/play.svg"); icon-size: 22px; clicked => { root.toggle-play(); } }
+            RoundButton { width: 40px; label: "Next"; icon: @image-url("icons/next.svg"); icon-size: 18px; clicked => { root.next(); } }
+        }
+        // Progress line along the bottom edge.
+        Rectangle {
+            x: 14px; y: parent.height - 3px; width: parent.width - 28px; height: 2px; border-radius: 1px; background: Theme.hairline;
+            Rectangle { x: 0; width: parent.width * clamp(root.position / max(1, root.duration), 0, 1); background: Theme.text; border-radius: 1px; }
+        }
+    }
+
+    // ---- Tab bar ----
+    Rectangle {
+        y: parent.height - root.tab-height; height: root.tab-height;
+        background: Theme.glass;
+        Rectangle { y: 0; height: 1px; background: Theme.hairline; }
+        HorizontalLayout {
+            height: 56px; y: 0;
+            for entry[index] in [
+                { label: "Library", icon: @image-url("icons/home.svg"), screen: 0 },
+                { label: "Now Playing", icon: @image-url("icons/music.svg"), screen: 4 },
+                { label: "Queue", icon: @image-url("icons/queue.svg"), screen: 2 },
+                { label: "Settings", icon: @image-url("icons/settings.svg"), screen: 3 },
+            ]: tab-cell := Rectangle {
+                property <bool> active: entry.screen == 0 ? root.screen <= 1 : root.screen == entry.screen;
+                accessible-role: tab; accessible-label: entry.label;
+                accessible-action-default => { root.screen = entry.screen; }
+                VerticalLayout {
+                    alignment: center; spacing: 3px;
+                    Rectangle { height: 24px; Icon { source: entry.icon; colorize: tab-cell.active ? Theme.text : Theme.muted; } }
+                    Label { text: entry.label; font-size: 11px; font-weight: 600; horizontal-alignment: center; height: 14px; color: tab-cell.active ? Theme.text : Theme.muted; }
+                }
+                TouchArea { clicked => { root.screen = entry.screen; } }
+            }
+        }
+    }
+}
