@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Sonic
+GenericName=Music Player
+Comment=Play music from Plex and local files
+Exec=sonicplayer %F
+Icon=sonic
+Terminal=false
+Categories=AudioVideo;Audio;Player;
+MimeType=audio/mpeg;audio/flac;audio/ogg;audio/mp4;audio/x-wav;audio/aac;
+StartupWMClass=sonicplayer

@@ -26,3 +26,63 @@ jobs:
           name: sonicplayer-windows-x64
           path: native/target/release/sonicplayer.exe
           if-no-files-found: error
+
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install system libraries
+        # ALSA for audio, xkbcommon/X11/Wayland for windows, fontconfig for fonts.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libasound2-dev libxkbcommon-dev libfontconfig1-dev \
+            libwayland-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev
+      - name: Update Rust stable
+        run: rustup update stable --no-self-update
+      - name: Test
+        run: cargo test --release --locked --manifest-path native/Cargo.toml
+      - name: Build
+        run: cargo build --release --locked --manifest-path native/Cargo.toml
+      - name: Package
+        run: |
+          mkdir -p dist/sonic
+          cp native/target/release/sonicplayer dist/sonic/
+          cp native/packaging/linux/sonic.desktop native/packaging/linux/install.sh dist/sonic/
+          cp native/assets/icon.png dist/sonic/sonic.png
+          chmod +x dist/sonic/install.sh dist/sonic/sonicplayer
+          tar -C dist -czf dist/sonicplayer-linux-x64.tar.gz sonic
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sonicplayer-linux-x64
+          path: dist/sonicplayer-linux-x64.tar.gz
+          if-no-files-found: error
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Update Rust stable
+        run: rustup update stable --no-self-update
+      - name: Test
+        run: cargo test --release --locked --manifest-path native/Cargo.toml
+      - name: Build
+        run: cargo build --release --locked --manifest-path native/Cargo.toml
+      - name: Package Sonic.app
+        run: |
+          app=dist/Sonic.app/Contents
+          mkdir -p "$app/MacOS" "$app/Resources" icon.iconset
+          cp native/target/release/sonicplayer "$app/MacOS/"
+          cp native/packaging/macos/Info.plist "$app/"
+          for size in 16 32 128 256 512; do
+            sips -z $size $size native/assets/logo.png --out icon.iconset/icon_${size}x${size}.png >/dev/null
+            sips -z $((size * 2)) $((size * 2)) native/assets/logo.png --out icon.iconset/icon_${size}x${size}@2x.png >/dev/null
+          done
+          iconutil -c icns icon.iconset -o "$app/Resources/icon.icns"
+          # Unsigned build: ad-hoc sign so Apple Silicon will run it.
+          codesign --force --deep --sign - dist/Sonic.app
+          ditto -c -k --keepParent dist/Sonic.app dist/sonicplayer-macos-arm64.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sonicplayer-macos-arm64
+          path: dist/sonicplayer-macos-arm64.zip
+          if-no-files-found: error
