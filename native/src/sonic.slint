@@ -578,6 +578,9 @@ export component Sonic inherits Window {
     callback sign-out;
     callback reset-art;
     in-out property <string> discord-id;
+    // Plex address to try away from home, e.g. "203.0.113.7:25565".
+    in-out property <string> plex-address;
+    callback apply-plex-address;
     in-out property <string> discord-image;
     in property <string> discord-status;
     callback discord-test;
@@ -1791,6 +1794,16 @@ export component Sonic inherits Window {
                             clicked => { root.refresh-connection(); }
                         }
                         if root.connected && root.connection-status != "": Label { text: root.connection-status; font-size: 12px; color: Palette.muted; height: 20px; }
+                    }
+                    if root.settings-tab == 2: SettingsCard {
+                        Label { text: "Away from home"; font-size: 16px; font-weight: 700; height: 23px; }
+                        Text { text: "Sonic finds your server on its own. If it can't when you're away, enter your public IP and the port you forwarded."; wrap: word-wrap; color: Palette.muted; font-size: 13px; }
+                        HorizontalLayout {
+                            spacing: 12px; alignment: start;
+                            LineEdit { text <=> root.plex-address; min-width: 0px; max-width: 245px; horizontal-stretch: 1; placeholder-text: "e.g. 203.0.113.7:25565"; }
+                            Action { width: 120px; label: root.connecting ? "Connecting…" : "Save & connect"; clicked => { root.apply-plex-address(); } }
+                        }
+                        if !root.connected && root.connection-status != "": Text { text: root.connection-status; wrap: word-wrap; font-size: 12px; color: Palette.muted; }
                     }
                     if root.settings-tab == 2: SettingsCard {
                         Label { text: "Cache"; font-size: 16px; font-weight: 700; height: 23px; }

@@ -153,7 +153,7 @@ component SwitchRow inherits HorizontalLayout {
 component Field inherits Rectangle {
     in property <string> placeholder;
     in property <bool> secret;
-    out property <string> text: input.text;
+    in-out property <string> text <=> input.text;
     height: 44px; border-radius: 12px; background: Theme.raised;
     input := TextInput {
         x: 14px; width: parent.width - 14px - 74px; height: parent.height;
@@ -239,6 +239,7 @@ export component MobileApp inherits Window {
     in property <bool> connecting;
     in property <[LibraryItem]> libraries;
     in property <string> app-version;
+    in property <string> plex-address;
 
     in property <string> album-title;
     in property <string> album-artist;
@@ -285,6 +286,7 @@ export component MobileApp inherits Window {
     callback sign-in;
     callback sign-out;
     callback toggle-library(int);
+    callback apply-plex-address(string);
     callback set-columns(int);
     callback set-eq(int);
     callback toggle-normalizer;
@@ -518,6 +520,12 @@ export component MobileApp inherits Window {
             Card {
                 heading: "PLEX";
                 Text { text: root.status; wrap: word-wrap; color: Theme.muted; font-size: 14px; }
+                Text { text: "Away from home and it can't connect? Enter your public IP and forwarded port."; wrap: word-wrap; color: Theme.muted; font-size: 13px; }
+                address-field := Field { placeholder: "e.g. 203.0.113.7:25565"; text: root.plex-address; }
+                Pill {
+                    label: root.connecting ? "Connecting…" : "Save & connect";
+                    clicked => { if !root.connecting { root.apply-plex-address(address-field.text); } }
+                }
                 Pill {
                     label: root.signed-in ? "Sign out" : root.connecting ? "Connecting…" : "Sign in with Plex";
                     filled: !root.signed-in; danger: root.signed-in;

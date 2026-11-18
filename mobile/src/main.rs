@@ -140,11 +140,20 @@ struct Settings {
     eq_preset: usize,
     normalizer: bool,
     online_lyrics: bool,
+    /// Plex address to try away from home, e.g. "203.0.113.7:25565".
+    server_address: String,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { libraries: Vec::new(), columns: 2, eq_preset: 0, normalizer: false, online_lyrics: true }
+        Self {
+            libraries: Vec::new(),
+            columns: 2,
+            eq_preset: 0,
+            normalizer: false,
+            online_lyrics: true,
+            server_address: String::new(),
+        }
     }
 }
 
@@ -1048,6 +1057,8 @@ fn main() -> Result<()> {
         let mut app = app.borrow_mut();
         app.publish_settings(&ui);
         app.apply_audio_settings();
+        ui.set_plex_address(app.settings.server_address.as_str().into());
+        let _ = plex::set_manual_address(&app.settings.server_address);
         // Show the last known library straight away while Plex refreshes it.
         if let Some(albums) = read_json::<Vec<Entry>>(cache_path("albums.json")) {
             app.albums = albums;
@@ -1156,6 +1167,31 @@ fn main() -> Result<()> {
         app.save_settings();
         app.publish_libraries(&ui);
         app.reload_plex(&ui);
+    });
+    on!(on_apply_plex_address, |app, ui, address| {
+        if let Err(error) = plex::set_manual_address(&address) {
+            ui.set_status(error.to_string().into());
+            return;
+        }
+        app.settings.server_address = address.trim().to_owned();
+        app.save_settings();
+        ui.set_plex_address(address.trim().into());
+        ui.set_connecting(true);
+        ui.set_status("Connecting…".into());
+        let (tx, plex, wanted) = (app.tx.clone(), app.plex.clone(), app.settings.libraries.clone());
+        thread::spawn(move || {
+            let event = match plex {
+                Some(plex) => Event::Library(
+                    plex.refresh_connection().and_then(|plex| Ok((plex.clone(), plex.albums(&wanted)?))),
+                ),
+                None => match Plex::restore() {
+                    Ok(Some(plex)) => Event::Library(plex.albums(&wanted).map(|albums| (plex, albums))),
+                    Ok(None) => Event::NoPlex,
+                    Err(error) => Event::Library(Err(error)),
+                },
+            };
+            let _ = tx.send(event);
+        });
     });
     on!(on_set_columns, |app, ui, columns| {
         app.settings.columns = columns.clamp(2, 4) as u32;

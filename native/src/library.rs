@@ -40,6 +40,8 @@ pub struct Preferences {
     pub online_lyrics: bool,
     /// Plex music libraries to show (section keys); empty shows all of them.
     pub plex_libraries: Vec<String>,
+    /// Plex server address to try when away from home (e.g. "203.0.113.7:25565").
+    pub plex_address: String,
 }
 
 impl Default for Preferences {
@@ -68,6 +70,7 @@ impl Default for Preferences {
             streaming_remote: 2,
             online_lyrics: true,
             plex_libraries: Vec::new(),
+            plex_address: String::new(),
         }
     }
 }

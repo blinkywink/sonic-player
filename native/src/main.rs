@@ -570,6 +570,7 @@ impl State {
             normalizer: ui.get_normalizer_enabled(),
             online_lyrics: ui.get_online_lyrics(),
             plex_libraries: self.data.preferences.plex_libraries.clone(),
+            plex_address: ui.get_plex_address().trim().to_owned(),
             font: ui.get_font_index(),
             discord_id: ui.get_discord_id().trim().to_owned(),
             discord_image: ui.get_discord_image().trim().to_owned(),
@@ -1556,7 +1557,10 @@ impl State {
                         self.restore_playback(ui);
                         ui.set_status(format!("{} albums", self.albums.len()).into());
                     }
-                    Err(err) => ui.set_status(format!("Plex: {err}").into()),
+                    Err(err) => {
+                        ui.set_connection_status(format!("{err}").into());
+                        ui.set_status(format!("Plex: {err}").into());
+                    }
                 }
             }
             Event::LocalLibrary(generation, result)
@@ -2432,6 +2436,7 @@ fn main() -> Result<()> {
     ui.set_font_index(preferences.font.clamp(0, 5));
     ui.set_normalizer_enabled(preferences.normalizer);
     ui.set_online_lyrics(preferences.online_lyrics);
+    ui.set_plex_address(preferences.plex_address.as_str().into());
     ui.set_app_version(env!("CARGO_PKG_VERSION").into());
     ui.set_eq_preset_index(preferences.eq_preset.clamp(0, 6));
     ui.set_discord_id(preferences.discord_id.as_str().into());
@@ -3702,6 +3707,37 @@ fn main() -> Result<()> {
         }
     });
     let mut last_presence = (String::new(), String::new(), 0, false);
+    let _ = plex::set_manual_address(&preferences.plex_address);
+    ui.on_apply_plex_address({
+        let (state, weak, tx) = (state.clone(), ui.as_weak(), tx.clone());
+        move || {
+            let Some(ui) = weak.upgrade() else { return };
+            if let Err(error) = plex::set_manual_address(&ui.get_plex_address()) {
+                ui.set_connection_status(error.to_string().into());
+                return;
+            }
+            let Ok(mut state) = state.try_borrow_mut() else { return };
+            state.save(&ui, "Saved the Plex address.");
+            if ui.get_connecting() {
+                return;
+            }
+            ui.set_connecting(true);
+            ui.set_connection_status("Connecting…".into());
+            let (tx, plex) = (tx.clone(), state.plex.clone());
+            let wanted = state.data.preferences.plex_libraries.clone();
+            thread::spawn(move || {
+                let event = match plex {
+                    Some(plex) => Event::PlexConnection(plex.refresh_connection()),
+                    None => match Plex::restore() {
+                        Ok(Some(plex)) => Event::Library(plex.albums(&wanted).map(|albums| (plex, albums))),
+                        Ok(None) => Event::NoSavedPlex,
+                        Err(error) => Event::Library(Err(error)),
+                    },
+                };
+                let _ = tx.send(event);
+            });
+        }
+    });
     ui.set_connecting(true);
     {
         let tx = tx.clone();

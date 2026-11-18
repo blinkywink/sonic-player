@@ -104,8 +104,47 @@ struct Device {
     client_identifier: String,
     provides: String,
     access_token: Option<String>,
+    /// The server's public IP as plex.tv last saw it.
+    #[serde(default)]
+    public_address: String,
     #[serde(default)]
     connections: Vec<Connection>,
+}
+
+/// An address typed in Settings (e.g. "203.0.113.7:25565"), tried right after the
+/// home network.
+static MANUAL_ADDRESS: RwLock<Option<Url>> = RwLock::new(None);
+
+/// Sets (or clears, with "") the address typed in Settings. Accepts "host:port",
+/// or a full http(s):// URL.
+pub fn set_manual_address(text: &str) -> Result<()> {
+    let text = text.trim().trim_end_matches('/');
+    let url = if text.is_empty() {
+        None
+    } else {
+        let full = if text.contains("://") { text.to_owned() } else { format!("http://{text}") };
+        let url = Url::parse(&full).context("Enter an address like 203.0.113.7:25565")?;
+        if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+            bail!("Enter an address like 203.0.113.7:25565");
+        }
+        Some(url)
+    };
+    if let Ok(mut manual) = MANUAL_ADDRESS.write() {
+        *manual = url;
+    }
+    Ok(())
+}
+
+/// Short reason a connection attempt failed, for the "couldn't reach" message.
+fn describe_failure(error: &anyhow::Error) -> String {
+    match error.downcast_ref::<reqwest::Error>() {
+        Some(e) if e.is_timeout() => "timed out".into(),
+        Some(e) if e.is_connect() => "couldn't connect".into(),
+        Some(e) if e.status().is_some() => format!("HTTP {}", e.status().map(|s| s.as_u16()).unwrap_or(0)),
+        Some(e) if e.is_decode() => "not a Plex server".into(),
+        Some(_) => "failed".into(),
+        None => error.to_string(),
+    }
 }
 
 #[derive(Deserialize)]
@@ -283,44 +322,85 @@ impl Plex {
     }
 
     /// Tries every address of every music server at once and returns the best one
-    /// that answers: home network first, then direct remote (HTTPS before HTTP),
-    /// then Plex's relay as a last resort.
+    /// that answers: home network, an address typed in Settings, direct remote
+    /// (HTTPS, then HTTP), the server's public IP on its known ports, then Plex's
+    /// relay as a last resort.
     fn find_server(http: &Client, account: &Account, only: Option<&str>) -> Result<Found> {
         let devices: Vec<Device> = headers(
             http.get("https://plex.tv/api/v2/resources?includeHttps=1&includeRelay=1"),
             &account.client_id,
         )
         .header("X-Plex-Token", &account.token)
-        .send()?
+        .send()
+        .context("Couldn't reach plex.tv. Check your internet connection")?
         .error_for_status()?
         .json()?;
-        let mut candidates = Vec::new();
+        let manual = MANUAL_ADDRESS.read().ok().and_then(|manual| manual.clone());
+        // (rank, url, local, token, server id); lower rank is better.
+        let mut candidates: Vec<(u8, Url, bool, String, String)> = Vec::new();
         for device in devices
             .into_iter()
             .filter(|device| device.provides.split(',').any(|p| p == "server"))
             .filter(|device| only.is_none_or(|id| device.client_identifier == id))
         {
-            let token = device.access_token.unwrap_or_else(|| account.token.clone());
-            for connection in device.connections {
-                if matches!(connection.uri.scheme(), "http" | "https") {
-                    let rank = (connection.relay, !connection.local, connection.uri.scheme() != "https");
-                    candidates.push((rank, connection, token.clone(), device.client_identifier.clone()));
+            let token = device.access_token.clone().unwrap_or_else(|| account.token.clone());
+            let id = device.client_identifier.clone();
+            let mut ports = vec![32400];
+            for connection in &device.connections {
+                if !matches!(connection.uri.scheme(), "http" | "https") {
+                    continue;
+                }
+                let https = connection.uri.scheme() == "https";
+                let rank = match (connection.local, connection.relay, https) {
+                    (true, _, true) => 0,
+                    (true, _, false) => 1,
+                    (false, true, _) => 6,
+                    (false, false, true) => 3,
+                    (false, false, false) => 4,
+                };
+                if !connection.local
+                    && !connection.relay
+                    && let Some(port) = connection.uri.port_or_known_default()
+                    && !ports.contains(&port)
+                {
+                    ports.push(port);
+                }
+                candidates.push((rank, connection.uri.clone(), connection.local, token.clone(), id.clone()));
+            }
+            if let Some(url) = &manual {
+                candidates.push((2, url.clone(), false, token.clone(), id.clone()));
+            }
+            // plex.tv's remote addresses can carry the wrong port (for example when
+            // the router forwards a custom one); try the public IP directly too.
+            if !device.public_address.is_empty() {
+                for port in ports {
+                    if let Ok(url) = Url::parse(&format!("http://{}:{port}", device.public_address))
+                        && !candidates.iter().any(|(_, known, ..)| *known == url)
+                    {
+                        candidates.push((5, url, false, token.clone(), id.clone()));
+                    }
                 }
             }
         }
-        // Servers keep plex.tv's order; within one, the best kind of address first.
         candidates.sort_by_key(|(rank, ..)| *rank);
         if candidates.is_empty() {
             bail!("No Plex server was found on this account");
         }
 
+        let labels: Vec<String> = candidates
+            .iter()
+            .map(|(rank, url, ..)| {
+                let host = url.host_str().unwrap_or("?");
+                let port = url.port_or_known_default().unwrap_or(0);
+                if *rank == 6 { "Plex relay".to_owned() } else { format!("{host}:{port}") }
+            })
+            .collect();
         let (tx, rx) = mpsc::channel();
-        for (index, (_, connection, token, server_id)) in candidates.into_iter().enumerate() {
+        for (index, (_, url, local, token, server_id)) in candidates.into_iter().enumerate() {
             let (tx, http, client_id) = (tx.clone(), http.clone(), account.client_id.clone());
             thread::spawn(move || {
                 let probe = || -> Result<Found> {
-                    let url = connection.uri.join("/library/sections")?;
-                    let sections = headers(http.get(url), &client_id)
+                    let sections = headers(http.get(url.join("/library/sections")?), &client_id)
                         .header("X-Plex-Token", &token)
                         .timeout(Duration::from_secs(6))
                         .send()?
@@ -333,39 +413,44 @@ impl Plex {
                         .filter(|s| matches!(s.kind.as_str(), "artist" | "music"))
                         .collect();
                     if music.is_empty() {
-                        bail!("No music library");
+                        bail!("no music library");
                     }
-                    Ok(Found {
-                        endpoint: Endpoint { url: connection.uri, local: connection.local },
-                        token,
-                        server_id,
-                        music,
-                    })
+                    Ok(Found { endpoint: Endpoint { url, local }, token, server_id, music })
                 };
-                let _ = tx.send((index, probe().ok()));
+                let _ = tx.send((index, probe().map_err(|error| describe_failure(&error))));
             });
         }
         drop(tx);
 
         // Take the best-ranked address that answered, once every better one has failed.
-        let mut results: Vec<Option<Option<Found>>> = Vec::new();
-        while let Ok((index, found)) = rx.recv() {
-            if results.len() <= index {
-                results.resize_with(index + 1, || None);
-            }
-            results[index] = Some(found);
+        let mut results: Vec<Option<std::result::Result<Found, String>>> = Vec::new();
+        results.resize_with(labels.len(), || None);
+        while let Ok((index, result)) = rx.recv() {
+            results[index] = Some(result);
             for slot in &mut results {
                 match slot {
-                    Some(Some(_)) => return Ok(slot.take().flatten().expect("checked")),
-                    Some(None) => continue,
+                    Some(Ok(_)) => {
+                        if let Some(Ok(found)) = slot.take() {
+                            return Ok(found);
+                        }
+                    }
+                    Some(Err(_)) => continue,
                     None => break,
                 }
             }
         }
-        if let Some(found) = results.into_iter().flatten().flatten().next() {
-            return Ok(found);
-        }
-        bail!("Couldn't reach your Plex server. Check that Remote Access is on in Plex.")
+        let tried: Vec<String> = labels
+            .iter()
+            .zip(&results)
+            .map(|(label, result)| match result {
+                Some(Err(reason)) => format!("{label} {reason}"),
+                _ => format!("{label} no answer"),
+            })
+            .collect();
+        bail!(
+            "Couldn't reach your Plex server ({}). Away from home? Turn on Remote Access in Plex, or enter your public address in Settings.",
+            tried.join(", ")
+        )
     }
 
     /// Sends a request, and if the server can't be reached, finds a working address
