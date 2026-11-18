@@ -1211,8 +1211,9 @@ fn main() -> Result<()> {
     // Restore the saved Plex and Last.fm sign-ins in the background.
     ui.set_connecting(true);
     {
-        let (tx, wanted) = (tx.clone(), app.borrow().settings.libraries.clone());
+        let (plex_tx, wanted) = (tx.clone(), app.borrow().settings.libraries.clone());
         thread::spawn(move || {
+            let tx = plex_tx;
             let event = match Plex::restore() {
                 Ok(Some(plex)) => Event::Library(plex.albums(&wanted).map(|albums| (plex, albums))),
                 Ok(None) => Event::NoPlex,
