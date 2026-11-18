@@ -62,6 +62,10 @@ impl ClientKeys {
         url.query_pairs_mut()
             .append_pair("api_key", &keys.key)
             .append_pair("token", &token);
+        // On iPhone the `open` crate needs a jailbreak tool; use UIKit instead.
+        #[cfg(target_os = "ios")]
+        crate::ios::open_url(url.as_str());
+        #[cfg(not(target_os = "ios"))]
         open::that_detached(url.as_str())?;
         Ok(Pending {
             client: keys,

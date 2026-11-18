@@ -1,6 +1,6 @@
 [package]
 name = "sonic-mobile"
-version = "0.3.2"
+version = "0.4.0"
 edition = "2024"
 description = "Sonic for iPhone: a lean Plex music player"
 repository = "https://github.com/blinkywink/sonic-player"
@@ -22,6 +22,7 @@ anyhow = "1"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 rodio = { version = "0.21", features = ["symphonia-all"] }
 lofty = "0.25"
+md5 = "0.7"
 
 [build-dependencies]
 slint-build = "1.19"

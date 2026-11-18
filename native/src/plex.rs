@@ -5,6 +5,7 @@ use reqwest::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
+    sync::{Arc, Mutex, RwLock, mpsc},
     thread,
     time::{Duration, Instant},
 };
@@ -13,13 +14,29 @@ use std::{
 pub struct Plex {
     pub http: Client,
     account: Account,
-    pub server: Url,
+    /// The address in use; shared by every clone so a reconnect helps them all.
+    endpoint: Arc<RwLock<Endpoint>>,
+    /// Held while looking for a working address, so only one search runs at a time.
+    reconnecting: Arc<Mutex<Option<Instant>>>,
     token: String,
     pub library: String,
     /// Every music library on the server as (key, title), in server order.
     pub sections: Vec<(String, String)>,
     pub server_id: String,
-    pub is_local: bool,
+}
+
+#[derive(Clone)]
+struct Endpoint {
+    url: Url,
+    local: bool,
+}
+
+/// A music library server found at one of its addresses.
+struct Found {
+    endpoint: Endpoint,
+    token: String,
+    server_id: String,
+    music: Vec<Section>,
 }
 
 #[derive(Clone, Default, Deserialize, PartialEq, Serialize)]
@@ -203,80 +220,170 @@ impl Plex {
         Self::discover(http, account, None)
     }
 
+    /// The server address in use, and whether it is on the home network.
+    pub fn server(&self) -> Url {
+        self.endpoint.read().map(|e| e.url.clone()).unwrap_or_else(|e| e.into_inner().url.clone())
+    }
+
+    pub fn is_local(&self) -> bool {
+        self.endpoint.read().map(|e| e.local).unwrap_or(false)
+    }
+
+    /// Looks for a working address for the same server again (after a network
+    /// change, such as leaving home). Returns whether one was found.
+    pub fn reconnect(&self) -> bool {
+        let Ok(mut last) = self.reconnecting.lock() else { return false };
+        // Someone else just reconnected; use what they found.
+        if last.is_some_and(|at| at.elapsed() < Duration::from_secs(5)) {
+            return true;
+        }
+        let found = Self::find_server(&self.http, &self.account, Some(&self.server_id));
+        *last = Some(Instant::now());
+        match found {
+            Ok(found) => {
+                if let Ok(mut endpoint) = self.endpoint.write() {
+                    *endpoint = found.endpoint;
+                }
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// Finds the best working address for this server now (Settings' refresh button).
     pub fn refresh_connection(&self) -> Result<Self> {
-        Self::discover(
-            self.http.clone(),
-            self.account.clone(),
-            Some((&self.server_id, &self.library)),
-        )
+        let found = Self::find_server(&self.http, &self.account, Some(&self.server_id))?;
+        if let Ok(mut endpoint) = self.endpoint.write() {
+            *endpoint = found.endpoint;
+        }
+        if let Ok(mut last) = self.reconnecting.lock() {
+            *last = Some(Instant::now());
+        }
+        Ok(self.clone())
     }
 
     fn discover(http: Client, account: Account, current: Option<(&str, &str)>) -> Result<Self> {
+        let found = Self::find_server(&http, &account, current.map(|(server, _)| server))?;
+        let section = found
+            .music
+            .iter()
+            .find(|s| current.is_none_or(|(_, library)| s.key == library))
+            .or(found.music.first())
+            .context("No Plex music library was found")?;
+        Ok(Self {
+            http,
+            account,
+            endpoint: Arc::new(RwLock::new(found.endpoint)),
+            reconnecting: Arc::new(Mutex::new(None)),
+            token: found.token,
+            library: section.key.clone(),
+            sections: found.music.into_iter().map(|s| (s.key, s.title)).collect(),
+            server_id: found.server_id,
+        })
+    }
+
+    /// Tries every address of every music server at once and returns the best one
+    /// that answers: home network first, then direct remote (HTTPS before HTTP),
+    /// then Plex's relay as a last resort.
+    fn find_server(http: &Client, account: &Account, only: Option<&str>) -> Result<Found> {
         let devices: Vec<Device> = headers(
-            http.get("https://plex.tv/api/v2/resources?includeHttps=1&includeRelay=0"),
+            http.get("https://plex.tv/api/v2/resources?includeHttps=1&includeRelay=1"),
             &account.client_id,
         )
         .header("X-Plex-Token", &account.token)
         .send()?
         .error_for_status()?
         .json()?;
-        for mut device in devices
+        let mut candidates = Vec::new();
+        for device in devices
             .into_iter()
             .filter(|device| device.provides.split(',').any(|p| p == "server"))
+            .filter(|device| only.is_none_or(|id| device.client_identifier == id))
         {
-            if current.is_some_and(|(server, _)| device.client_identifier != server) {
-                continue;
-            }
             let token = device.access_token.unwrap_or_else(|| account.token.clone());
-            device
-                .connections
-                .sort_by_key(|c| (!c.local, c.uri.scheme() != "https"));
-            for connection in device
-                .connections
-                .into_iter()
-                .filter(|c| !c.relay && matches!(c.uri.scheme(), "http" | "https"))
-            {
-                let mut plex = Self {
-                    http: http.clone(),
-                    account: account.clone(),
-                    server: connection.uri,
-                    token: token.clone(),
-                    library: String::new(),
-                    sections: Vec::new(),
-                    server_id: device.client_identifier.clone(),
-                    is_local: connection.local,
-                };
-                let sections = plex.request("/library/sections").and_then(|r| {
-                    Ok(r.timeout(Duration::from_secs(5))
+            for connection in device.connections {
+                if matches!(connection.uri.scheme(), "http" | "https") {
+                    let rank = (connection.relay, !connection.local, connection.uri.scheme() != "https");
+                    candidates.push((rank, connection, token.clone(), device.client_identifier.clone()));
+                }
+            }
+        }
+        // Servers keep plex.tv's order; within one, the best kind of address first.
+        candidates.sort_by_key(|(rank, ..)| *rank);
+        if candidates.is_empty() {
+            bail!("No Plex server was found on this account");
+        }
+
+        let (tx, rx) = mpsc::channel();
+        for (index, (_, connection, token, server_id)) in candidates.into_iter().enumerate() {
+            let (tx, http, client_id) = (tx.clone(), http.clone(), account.client_id.clone());
+            thread::spawn(move || {
+                let probe = || -> Result<Found> {
+                    let url = connection.uri.join("/library/sections")?;
+                    let sections = headers(http.get(url), &client_id)
+                        .header("X-Plex-Token", &token)
+                        .timeout(Duration::from_secs(6))
                         .send()?
                         .error_for_status()?
-                        .json::<Envelope<Sections>>()?)
-                });
-                if let Ok(sections) = sections {
+                        .json::<Envelope<Sections>>()?;
                     let music: Vec<Section> = sections
                         .container
                         .directories
                         .into_iter()
                         .filter(|s| matches!(s.kind.as_str(), "artist" | "music"))
                         .collect();
-                    if let Some(section) = music
-                        .iter()
-                        .find(|s| current.is_none_or(|(_, library)| s.key == library))
-                        .or(music.first())
-                    {
-                        plex.library = section.key.clone();
-                        plex.sections = music.into_iter().map(|s| (s.key, s.title)).collect();
-                        return Ok(plex);
+                    if music.is_empty() {
+                        bail!("No music library");
                     }
+                    Ok(Found {
+                        endpoint: Endpoint { url: connection.uri, local: connection.local },
+                        token,
+                        server_id,
+                        music,
+                    })
+                };
+                let _ = tx.send((index, probe().ok()));
+            });
+        }
+        drop(tx);
+
+        // Take the best-ranked address that answered, once every better one has failed.
+        let mut results: Vec<Option<Option<Found>>> = Vec::new();
+        while let Ok((index, found)) = rx.recv() {
+            if results.len() <= index {
+                results.resize_with(index + 1, || None);
+            }
+            results[index] = Some(found);
+            for slot in &mut results {
+                match slot {
+                    Some(Some(_)) => return Ok(slot.take().flatten().expect("checked")),
+                    Some(None) => continue,
+                    None => break,
                 }
             }
         }
-        bail!("No reachable Plex music library was found");
+        if let Some(found) = results.into_iter().flatten().flatten().next() {
+            return Ok(found);
+        }
+        bail!("Couldn't reach your Plex server. Check that Remote Access is on in Plex.")
+    }
+
+    /// Sends a request, and if the server can't be reached, finds a working address
+    /// (e.g. after leaving home) and tries once more.
+    fn send(&self, path: &str, build: impl Fn(RequestBuilder) -> RequestBuilder) -> Result<reqwest::blocking::Response> {
+        match build(self.request(path)?).send() {
+            Ok(response) => Ok(response.error_for_status()?),
+            Err(error) if (error.is_connect() || error.is_timeout()) && self.reconnect() => {
+                Ok(build(self.request(path)?).send()?.error_for_status()?)
+            }
+            Err(error) => Err(error.into()),
+        }
     }
 
     pub fn request(&self, path: &str) -> Result<RequestBuilder> {
-        let url = self.server.join(path)?;
-        if url.origin() != self.server.origin() {
+        let server = self.server();
+        let url = server.join(path)?;
+        if url.origin() != server.origin() {
             bail!("Unexpected Plex resource origin");
         }
         Ok(
@@ -326,15 +433,14 @@ impl Plex {
         loop {
             let start = entries.len().to_string();
             let page = self
-                .request(&format!("/library/sections/{section}/all"))?
-                .query(&[
-                    ("type", "9"),
-                    ("sort", "titleSort"),
-                    ("X-Plex-Container-Start", &start),
-                    ("X-Plex-Container-Size", "200"),
-                ])
-                .send()?
-                .error_for_status()?
+                .send(&format!("/library/sections/{section}/all"), |request| {
+                    request.query(&[
+                        ("type", "9"),
+                        ("sort", "titleSort"),
+                        ("X-Plex-Container-Start", &start),
+                        ("X-Plex-Container-Size", "200"),
+                    ])
+                })?
                 .json::<Envelope<Items>>()?
                 .container
                 .entries;
@@ -358,9 +464,7 @@ impl Plex {
 
     pub fn tracks(&self, album: &Entry) -> Result<Vec<Entry>> {
         Ok(self
-            .request(&format!("/library/metadata/{}/children", album.rating_key))?
-            .send()?
-            .error_for_status()?
+            .send(&format!("/library/metadata/{}/children", album.rating_key), |request| request)?
             .json::<Envelope<Items>>()?
             .container
             .entries)
@@ -372,11 +476,7 @@ impl Plex {
             .iter()
             .find_map(|m| m.parts.first())
             .context("Plex gave this track no playable file")?;
-        Ok(self
-            .request(&part.key)?
-            .timeout(Duration::from_secs(120))
-            .send()?
-            .error_for_status()?)
+        self.send(&part.key, |request| request.timeout(Duration::from_secs(120)))
     }
 }
 
@@ -400,7 +500,11 @@ mod tests {
                 token: String::new(),
                 client_id: String::new(),
             },
-            server: Url::parse("http://127.0.0.1:32400").unwrap(),
+            endpoint: Arc::new(RwLock::new(Endpoint {
+                url: Url::parse("http://127.0.0.1:32400").unwrap(),
+                local: true,
+            })),
+            reconnecting: Arc::new(Mutex::new(None)),
             token: String::new(),
             library: sections
                 .first()
@@ -411,7 +515,6 @@ mod tests {
                 .map(|(k, t)| (k.to_string(), t.to_string()))
                 .collect(),
             server_id: String::new(),
-            is_local: true,
         }
     }
 

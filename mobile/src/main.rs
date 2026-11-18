@@ -1,10 +1,14 @@
-//! Sonic for iPhone: albums, an album's songs, playback with a simple queue, and
-//! Plex settings. Shares Sonic's Plex, streaming and local-file code with the
+//! Sonic for iPhone: albums (A–Z by artist, searchable), an album's songs, playback
+//! with a simple queue and a full-screen player, Last.fm scrobbling, EQ and Plex
+//! settings. Shares Sonic's Plex, streaming, lyrics, EQ and Last.fm code with the
 //! desktop app; on a desktop it runs in a phone-sized window for testing.
 
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 mod credentials;
+#[allow(dead_code)] // Shared with the desktop app, which uses more of it.
+#[path = "../../native/src/eq.rs"]
+mod eq;
 #[cfg(target_os = "ios")]
 mod ios;
 /// Desktop test builds have no system media controls.
@@ -20,8 +24,14 @@ mod ios {
     }
     pub fn set_artwork(_key: &str, _bytes: &[u8]) {}
     pub fn now_playing(_info: Option<&NowPlaying>) {}
+    pub fn open_url(url: &str) {
+        let _ = open::that_detached(url);
+    }
     pub fn open_pending() {}
 }
+#[allow(dead_code)] // Shared with the desktop app, which uses more of it.
+#[path = "../../native/src/lastfm.rs"]
+mod lastfm;
 #[cfg(not(target_os = "ios"))]
 #[path = "../../native/src/local.rs"]
 mod local;
@@ -44,7 +54,7 @@ use slint::{
 };
 use std::{
     cell::RefCell,
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     io::{BufReader, Read, Seek},
     path::PathBuf,
     rc::Rc,
@@ -54,7 +64,7 @@ use std::{
         mpsc::{Receiver, Sender, channel},
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 slint::include_modules!();
@@ -62,7 +72,12 @@ slint::include_modules!();
 /// Covers are shown at most ~170 pt wide (about 510 px on a 3x screen); 360 px keeps
 /// them sharp enough while keeping memory small.
 const COVER_SIZE: u32 = 360;
+/// Decoded covers kept in memory; older ones are dropped and reloaded from disk.
 const COVER_CACHE: usize = 120;
+/// Lock screen artwork size (the system scales it down as needed).
+const NOW_ART_SIZE: u32 = 1024;
+/// How often failed scrobbles are retried.
+const SCROBBLE_RETRY: Duration = Duration::from_secs(120);
 
 type Art = SharedPixelBuffer<Rgba8Pixel>;
 
@@ -80,6 +95,11 @@ enum Event {
     Lyrics(String, Option<Vec<lyrics::Line>>),
     /// Full-size cover (encoded) for the lock screen, by album key.
     NowArt(String, Vec<u8>),
+    FmRestored(Option<lastfm::Session>),
+    FmPending(u64, Result<lastfm::Pending>),
+    FmConnected(u64, Result<lastfm::Session>),
+    /// Scrobbles that still need sending (failed for now), and the last error.
+    FmUnsent(Vec<Scrobble>, Option<String>),
 }
 
 /// A command from the lock screen, Control Center, headphones or car.
@@ -104,37 +124,83 @@ pub struct NowPlaying {
     pub art_key: String,
 }
 
-/// Lock screen artwork size (the system scales it down as needed).
-const NOW_ART_SIZE: u32 = 1024;
+#[derive(Clone, Deserialize, Serialize)]
+struct Scrobble {
+    track: Entry,
+    started_at: u64,
+}
 
-#[derive(Default, Deserialize, Serialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(default)]
 struct Settings {
     /// Plex music libraries to show; empty shows all.
     libraries: Vec<String>,
+    /// Albums per row in the library (2–4).
+    columns: u32,
+    eq_preset: usize,
+    normalizer: bool,
+    online_lyrics: bool,
 }
 
-fn settings_path() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
-    Some(PathBuf::from(home).join("Library/Application Support/Sonic/mobile.json"))
-}
-
-fn load_settings() -> Settings {
-    settings_path()
-        .and_then(|path| std::fs::read(path).ok())
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-        .unwrap_or_default()
-}
-
-fn save_settings(settings: &Settings) {
-    if let Some(path) = settings_path() {
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        if let Ok(bytes) = serde_json::to_vec(settings) {
-            let _ = std::fs::write(path, bytes);
-        }
+impl Default for Settings {
+    fn default() -> Self {
+        Self { libraries: Vec::new(), columns: 2, eq_preset: 0, normalizer: false, online_lyrics: true }
     }
+}
+
+fn home() -> Option<PathBuf> {
+    std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from)
+}
+
+/// Settings and unsent scrobbles (kept).
+fn data_path(name: &str) -> Option<PathBuf> {
+    Some(home()?.join("Library/Application Support/Sonic").join(name))
+}
+
+/// Album list and covers (may be cleared by iOS).
+fn cache_path(name: &str) -> Option<PathBuf> {
+    Some(home()?.join("Library/Caches/Sonic").join(name))
+}
+
+fn read_json<T: for<'de> Deserialize<'de>>(path: Option<PathBuf>) -> Option<T> {
+    serde_json::from_slice(&std::fs::read(path?).ok()?).ok()
+}
+
+fn write_bytes(path: Option<PathBuf>, bytes: &[u8]) {
+    let Some(path) = path else { return };
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(path, bytes);
+}
+
+fn write_json<T: Serialize>(path: Option<PathBuf>, value: &T) {
+    if let Ok(bytes) = serde_json::to_vec(value) {
+        write_bytes(path, &bytes);
+    }
+}
+
+fn cover_file(key: &str) -> Option<PathBuf> {
+    let name: String = key.chars().filter(char::is_ascii_alphanumeric).collect();
+    if name.is_empty() {
+        return None;
+    }
+    cache_path(&format!("covers/{name}.jpg"))
+}
+
+fn now_seconds() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
+}
+
+/// Sort text: case-insensitive, ignoring a leading "The ".
+fn sort_text(text: &str) -> String {
+    let lower = text.trim().to_lowercase();
+    lower.strip_prefix("the ").map(str::to_owned).unwrap_or(lower)
+}
+
+/// Artist A–Z, then each artist's albums oldest first.
+fn sort_albums(albums: &mut [Entry]) {
+    albums.sort_by_cached_key(|album| (sort_text(&album.parent_title), album.year, sort_text(&album.title)));
 }
 
 struct App {
@@ -142,10 +208,13 @@ struct App {
     settings: Settings,
     plex: Option<Plex>,
     albums: Vec<Entry>,
+    /// Album indices shown in each grid row (after search).
+    rows: Vec<Vec<usize>>,
+    query: String,
     tracks: HashMap<String, Vec<Entry>>,
     open_album: String,
     art: HashMap<String, Image>,
-    art_order: Vec<String>,
+    art_order: VecDeque<String>,
     pending_art: HashSet<String>,
     queue: Vec<Entry>,
     current: usize,
@@ -153,6 +222,7 @@ struct App {
     stream: Option<OutputStream>,
     sink: Option<Sink>,
     playing: bool,
+    equalizer: Arc<eq::Settings>,
     album_model: Rc<VecModel<AlbumItem>>,
     lyrics_cache: HashMap<String, Option<Vec<lyrics::Line>>>,
     lyrics_pending: HashSet<String>,
@@ -161,10 +231,21 @@ struct App {
     lyric_index: i32,
     /// Album whose full-size lock screen cover is being fetched.
     now_art_pending: String,
+    fm_session: Option<lastfm::Session>,
+    fm_generation: u64,
+    /// When the current song started (Unix seconds), how long it has really played,
+    /// and whether it has been scrobbled.
+    fm_started: Option<u64>,
+    fm_listened: Duration,
+    fm_done: bool,
+    fm_unsent: Vec<Scrobble>,
+    fm_sending: bool,
+    fm_last_retry: Instant,
+    last_tick: Instant,
 }
 
 impl App {
-    fn publish_albums(&self, ui: &MobileApp) {
+    fn publish_albums(&mut self, ui: &MobileApp) {
         self.album_model.set_vec(
             self.albums
                 .iter()
@@ -176,14 +257,31 @@ impl App {
                 })
                 .collect::<Vec<_>>(),
         );
-        let rows = (0..self.albums.len())
-            .step_by(2)
-            .map(|first| AlbumRow {
-                first: first as i32,
-                count: (self.albums.len() - first).min(2) as i32,
+        self.publish_rows(ui);
+    }
+
+    /// Lays the (searched) albums out in rows of the chosen width.
+    fn publish_rows(&mut self, ui: &MobileApp) {
+        let columns = self.settings.columns.clamp(2, 4) as usize;
+        let query = self.query.trim().to_lowercase();
+        let visible: Vec<usize> = (0..self.albums.len())
+            .filter(|&index| {
+                let album = &self.albums[index];
+                query.is_empty()
+                    || album.title.to_lowercase().contains(&query)
+                    || album.parent_title.to_lowercase().contains(&query)
             })
-            .collect::<Vec<_>>();
-        ui.set_album_rows(ModelRc::new(VecModel::from(rows)));
+            .collect();
+        self.rows = visible.chunks(columns).map(<[usize]>::to_vec).collect();
+        ui.set_columns(columns as i32);
+        ui.set_album_rows(ModelRc::new(VecModel::from(
+            self.rows
+                .iter()
+                .map(|row| AlbumRow {
+                    items: ModelRc::new(VecModel::from(row.iter().map(|&i| i as i32).collect::<Vec<_>>())),
+                })
+                .collect::<Vec<_>>(),
+        )));
     }
 
     fn publish_libraries(&self, ui: &MobileApp) {
@@ -203,6 +301,23 @@ impl App {
         )));
     }
 
+    fn publish_settings(&self, ui: &MobileApp) {
+        ui.set_columns(self.settings.columns.clamp(2, 4) as i32);
+        ui.set_eq_preset(self.settings.eq_preset.min(eq::PRESETS.len() - 1) as i32);
+        ui.set_normalizer(self.settings.normalizer);
+        ui.set_online_lyrics(self.settings.online_lyrics);
+    }
+
+    fn save_settings(&self) {
+        write_json(data_path("mobile.json"), &self.settings);
+    }
+
+    fn apply_audio_settings(&self) {
+        let preset = self.settings.eq_preset.min(eq::PRESETS.len() - 1);
+        self.equalizer.update(&eq::PRESETS[preset], 0.0);
+        self.equalizer.set_normalizer(self.settings.normalizer);
+    }
+
     fn reload_plex(&self, ui: &MobileApp) {
         let Some(plex) = self.plex.clone() else { return };
         ui.set_connecting(true);
@@ -214,15 +329,16 @@ impl App {
         });
     }
 
-    /// Requests covers for album rows `first .. first + count` (two albums per row).
+    /// Requests covers for grid rows `first .. first + count`.
     fn request_art(&mut self, first_row: usize, rows: usize) {
-        let start = first_row * 2;
-        let end = (start + rows * 2).min(self.albums.len());
-        for album in self.albums.get(start..end).unwrap_or_default().to_vec() {
-            if self.pending_art.len() >= 4 {
+        let wanted: Vec<usize> = self.rows.iter().skip(first_row).take(rows).flatten().copied().collect();
+        for index in wanted {
+            if self.pending_art.len() >= 6 {
                 break;
             }
-            self.fetch_art(&album);
+            if let Some(album) = self.albums.get(index).cloned() {
+                self.fetch_art(&album);
+            }
         }
     }
 
@@ -242,32 +358,58 @@ impl App {
             let art = match (path, plex) {
                 #[cfg(not(target_os = "ios"))]
                 (Some(path), _) => local::art(&path).and_then(|data| decode(&data)),
-                (_, Some(plex)) if !thumb.is_empty() => plex_cover(&plex, &thumb),
-                _ => None,
+                (_, plex) => {
+                    // Covers are kept on disk, so they show instantly next time.
+                    let file = cover_file(&key);
+                    match file.as_ref().and_then(|file| std::fs::read(file).ok()) {
+                        Some(bytes) => decode(&bytes),
+                        None => match plex {
+                            Some(plex) if !thumb.is_empty() => {
+                                plex_cover_bytes(&plex, &thumb, COVER_SIZE).and_then(|bytes| {
+                                    let art = decode(&bytes);
+                                    if art.is_some() {
+                                        write_bytes(file, &bytes);
+                                    }
+                                    art
+                                })
+                            }
+                            _ => None,
+                        },
+                    }
+                }
             };
             let _ = tx.send(Event::Art(key, art));
         });
     }
 
-    fn store_art(&mut self, ui: &MobileApp, key: String, art: Art) {
-        let image = Image::from_rgba8(art);
-        if self.art_order.len() >= COVER_CACHE {
-            let old = self.art_order.remove(0);
-            self.art.remove(&old);
-        }
-        self.art_order.push(key.clone());
-        self.art.insert(key.clone(), image.clone());
+    fn set_album_art(&self, key: &str, image: Image) {
         if let Some(index) = self.albums.iter().position(|album| album.rating_key == key)
             && let Some(mut row) = self.album_model.row_data(index)
         {
-            row.art = image.clone();
+            row.art = image;
             self.album_model.set_row_data(index, row);
         }
+    }
+
+    fn store_art(&mut self, ui: &MobileApp, key: String, art: Art) {
+        let image = Image::from_rgba8(art);
+        // Drop the oldest cover from memory (it reloads from disk when needed).
+        if self.art_order.len() >= COVER_CACHE
+            && let Some(old) = self.art_order.pop_front()
+        {
+            self.art.remove(&old);
+            self.set_album_art(&old, Image::default());
+        }
+        self.art_order.push_back(key.clone());
+        self.art.insert(key.clone(), image.clone());
+        self.set_album_art(&key, image.clone());
         if self.open_album == key {
             ui.set_album_art(image);
         }
-        self.publish_now_playing(ui);
-        self.publish_queue(ui);
+        if self.queue.iter().skip(self.current).any(|track| track.parent_rating_key == key) {
+            self.publish_now_playing(ui);
+            self.publish_queue(ui);
+        }
     }
 
     fn open_album(&mut self, ui: &MobileApp, key: &str) {
@@ -277,6 +419,7 @@ impl App {
         self.open_album = key.to_owned();
         ui.set_album_title(album.title.as_str().into());
         ui.set_album_artist(album.parent_title.as_str().into());
+        ui.set_album_year(if album.year > 0 { album.year.to_string().into() } else { "".into() });
         ui.set_album_art(self.art.get(key).cloned().unwrap_or_default());
         ui.set_screen(1);
         self.fetch_art(&album);
@@ -288,9 +431,7 @@ impl App {
             ui.set_tracks_loading(true);
             let (tx, plex, key) = (self.tx.clone(), self.plex.clone(), key.to_owned());
             thread::spawn(move || {
-                let result = plex
-                    .context("Plex is disconnected")
-                    .and_then(|plex| plex.tracks(&album));
+                let result = plex.context("Plex is disconnected").and_then(|plex| plex.tracks(&album));
                 let _ = tx.send(Event::Tracks(key, result));
             });
         }
@@ -339,6 +480,7 @@ impl App {
         if let Some(track) = track {
             ui.set_now_title(track.title.as_str().into());
             ui.set_now_artist(track.grandparent_title.as_str().into());
+            ui.set_now_album(track.parent_title.as_str().into());
             ui.set_now_art(self.cover_for(track));
             ui.set_duration((track.duration as f32 / 1000.0).max(1.0));
         }
@@ -411,6 +553,7 @@ impl App {
         self.publish_tracks(ui);
         self.fetch_lyrics(ui);
         self.fetch_now_art();
+        self.start_scrobble(&track);
         if let Some(album) = self.albums.iter().find(|a| a.rating_key == track.parent_rating_key).cloned() {
             self.fetch_art(&album);
         }
@@ -428,9 +571,9 @@ impl App {
             if self.lyrics_cache.contains_key(&key) || !self.lyrics_pending.insert(key.clone()) {
                 continue;
             }
-            let tx = self.tx.clone();
+            let (tx, online) = (self.tx.clone(), self.settings.online_lyrics);
             thread::spawn(move || {
-                let _ = tx.send(Event::Lyrics(key, lyrics::find(&track, true)));
+                let _ = tx.send(Event::Lyrics(key, lyrics::find(&track, online)));
             });
         }
         self.present_lyrics(ui);
@@ -518,9 +661,7 @@ impl App {
         }
         if forward {
             if self.current + 1 >= self.queue.len() {
-                self.current = self.queue.len();
                 self.stop(ui);
-                self.current = self.queue.len() - 1;
                 return;
             }
             self.current += 1;
@@ -534,12 +675,88 @@ impl App {
         self.start_current(ui);
     }
 
+    // ---- Last.fm ----
+
+    fn publish_lastfm(&self, ui: &MobileApp) {
+        ui.set_fm_connected(self.fm_session.is_some());
+        ui.set_fm_user(self.fm_session.as_ref().map(|s| s.username.as_str()).unwrap_or_default().into());
+        if self.fm_session.is_some() {
+            ui.set_fm_status(match self.fm_unsent.len() {
+                0 => "Scrobbling is on.".into(),
+                1 => "1 scrobble waiting to send.".into(),
+                n => format!("{n} scrobbles waiting to send.").into(),
+            });
+        }
+    }
+
+    /// A new song started: tell Last.fm and start counting listening time.
+    fn start_scrobble(&mut self, track: &Entry) {
+        self.fm_started = Some(now_seconds());
+        self.fm_listened = Duration::ZERO;
+        self.fm_done = false;
+        if let Some(session) = self.fm_session.clone() {
+            let track = track.clone();
+            thread::spawn(move || {
+                let _ = session.now_playing(&track);
+            });
+        }
+    }
+
+    /// Scrobbles once the song has played for half its length or 4 minutes (songs
+    /// over 30 seconds), right away, so nothing is lost if the app is closed.
+    fn check_scrobble(&mut self) {
+        let (Some(started_at), false) = (self.fm_started, self.fm_done) else { return };
+        let Some(track) = self.queue.get(self.current) else { return };
+        if track.duration <= 30_000 || self.fm_listened < Duration::from_millis((track.duration / 2).min(240_000)) {
+            return;
+        }
+        self.fm_done = true;
+        if self.fm_session.is_none() {
+            return;
+        }
+        self.fm_unsent.push(Scrobble { track: track.clone(), started_at });
+        self.send_scrobbles();
+    }
+
+    /// Sends waiting scrobbles in the background; failures stay queued for later.
+    fn send_scrobbles(&mut self) {
+        let Some(session) = self.fm_session.clone() else { return };
+        if self.fm_sending || self.fm_unsent.is_empty() {
+            return;
+        }
+        self.fm_sending = true;
+        self.fm_last_retry = Instant::now();
+        let batch = std::mem::take(&mut self.fm_unsent);
+        let tx = self.tx.clone();
+        thread::spawn(move || {
+            let mut unsent = Vec::new();
+            let mut last_error = None;
+            for scrobble in batch {
+                if let Err(error) = session.scrobble(&scrobble.track, scrobble.started_at) {
+                    let message = error.to_string();
+                    // Last.fm refusing a track (e.g. missing artist) won't change; drop it.
+                    if !message.contains("did not accept") && !message.contains("missing an artist") {
+                        unsent.push(scrobble);
+                    }
+                    last_error = Some(message);
+                }
+            }
+            let _ = tx.send(Event::FmUnsent(unsent, last_error));
+        });
+    }
+
+    fn save_unsent(&self) {
+        write_json(data_path("scrobbles.json"), &self.fm_unsent);
+    }
+
     fn receive(&mut self, ui: &MobileApp, event: Event) {
         match event {
-            Event::Library(Ok((plex, albums))) => {
+            Event::Library(Ok((plex, mut albums))) => {
                 ui.set_connecting(false);
                 ui.set_signed_in(true);
                 ui.set_status(format!("{} albums from Plex.", albums.len()).into());
+                sort_albums(&mut albums);
+                write_json(cache_path("albums.json"), &albums);
                 self.plex = Some(plex);
                 self.albums = albums;
                 self.publish_libraries(ui);
@@ -551,7 +768,7 @@ impl App {
             }
             Event::NoPlex => {
                 ui.set_connecting(false);
-                ui.set_status("Sign in with Plex in Settings to see your music.".into());
+                ui.set_status("Sign in with Plex below to see your music.".into());
                 #[cfg(not(target_os = "ios"))]
                 {
                     // Desktop test runs fall back to the local music folder.
@@ -565,6 +782,7 @@ impl App {
             Event::Local(Ok(albums)) if self.plex.is_none() && !albums.is_empty() => {
                 ui.set_status(format!("{} local albums (desktop test mode).", albums.len()).into());
                 self.albums = albums.iter().map(|(album, _)| album.clone()).collect();
+                sort_albums(&mut self.albums);
                 self.tracks = albums.into_iter().map(|(album, tracks)| (album.rating_key, tracks)).collect();
                 self.publish_albums(ui);
             }
@@ -611,7 +829,7 @@ impl App {
                         if std::env::var_os("SONIC_MUTE").is_some() {
                             sink.set_volume(0.0);
                         }
-                        sink.append(decoder);
+                        sink.append(eq::Equalizer::new(decoder, self.equalizer.clone()));
                         if !self.playing {
                             sink.pause();
                         }
@@ -641,11 +859,70 @@ impl App {
                     self.present_lyrics(ui);
                 }
             }
+            Event::FmRestored(session) => {
+                self.fm_session = session;
+                self.publish_lastfm(ui);
+                self.send_scrobbles();
+            }
+            Event::FmPending(generation, result) if generation == self.fm_generation => match result {
+                Ok(pending) => {
+                    ui.set_fm_status("Approve Sonic on the Last.fm page in Safari, then come back here.".into());
+                    let (tx, generation) = (self.tx.clone(), self.fm_generation);
+                    thread::spawn(move || {
+                        // Wait for approval in Safari (Last.fm says "not yet" until then).
+                        let deadline = Instant::now() + Duration::from_secs(300);
+                        let result = loop {
+                            thread::sleep(Duration::from_secs(3));
+                            match pending.finish() {
+                                Err(error) if error.to_string().starts_with("Approve") && Instant::now() < deadline => continue,
+                                other => break other,
+                            }
+                        };
+                        let _ = tx.send(Event::FmConnected(generation, result));
+                    });
+                }
+                Err(error) => {
+                    ui.set_fm_pending(false);
+                    ui.set_fm_status(error.to_string().into());
+                }
+            },
+            Event::FmPending(..) => {}
+            Event::FmConnected(generation, result) if generation == self.fm_generation => {
+                ui.set_fm_pending(false);
+                match result {
+                    Ok(session) => {
+                        let _ = session.save();
+                        self.fm_session = Some(session);
+                        self.publish_lastfm(ui);
+                    }
+                    Err(error) => ui.set_fm_status(error.to_string().into()),
+                }
+            }
+            Event::FmConnected(..) => {}
+            Event::FmUnsent(mut unsent, error) => {
+                self.fm_sending = false;
+                // Keep anything queued while sending; cap at a month of heavy listening.
+                unsent.append(&mut self.fm_unsent);
+                unsent.truncate(2000);
+                self.fm_unsent = unsent;
+                self.save_unsent();
+                self.publish_lastfm(ui);
+                if let (Some(error), false) = (error, self.fm_unsent.is_empty()) {
+                    ui.set_fm_status(format!("{} Will retry.", error.trim_end_matches('.')).into());
+                }
+            }
         }
     }
 
-    /// Called a few times a second: progress, and moving on when a song ends.
+    /// Called a few times a second: progress, listening time, and moving on when a
+    /// song ends.
     fn tick(&mut self, ui: &MobileApp) {
+        let elapsed = self.last_tick.elapsed();
+        self.last_tick = Instant::now();
+        if self.fm_last_retry.elapsed() >= SCROBBLE_RETRY {
+            self.fm_last_retry = Instant::now();
+            self.send_scrobbles();
+        }
         let Some(sink) = &self.sink else { return };
         if sink.empty() {
             if self.playing {
@@ -653,6 +930,11 @@ impl App {
             }
             return;
         }
+        if self.playing && !sink.is_paused() {
+            self.fm_listened += elapsed.min(Duration::from_secs(1));
+            self.check_scrobble();
+        }
+        let Some(sink) = &self.sink else { return };
         let position = sink.get_pos().as_secs_f32();
         ui.set_position(position);
         if ui.get_lyrics_synced() {
@@ -679,10 +961,6 @@ fn decode(data: &[u8]) -> Option<Art> {
     };
     let pixels = image.into_rgba8();
     Some(SharedPixelBuffer::clone_from_slice(pixels.as_raw(), pixels.width(), pixels.height()))
-}
-
-fn plex_cover(plex: &Plex, thumb: &str) -> Option<Art> {
-    decode(&plex_cover_bytes(plex, thumb, COVER_SIZE)?)
 }
 
 /// An album cover from Plex, resized by the server, still encoded.
@@ -725,18 +1003,22 @@ fn main() -> Result<()> {
     ios::start_audio_session();
 
     let ui = MobileApp::new()?;
+    ui.set_app_version(env!("CARGO_PKG_VERSION").into());
     let (tx, rx): (Sender<Event>, Receiver<Event>) = channel();
     let album_model = Rc::new(VecModel::default());
     ui.set_albums(ModelRc::from(album_model.clone()));
+    let settings: Settings = read_json(data_path("mobile.json")).unwrap_or_default();
     let app = Rc::new(RefCell::new(App {
         tx: tx.clone(),
-        settings: load_settings(),
+        settings,
         plex: None,
         albums: Vec::new(),
+        rows: Vec::new(),
+        query: String::new(),
         tracks: HashMap::new(),
         open_album: String::new(),
         art: HashMap::new(),
-        art_order: Vec::new(),
+        art_order: VecDeque::new(),
         pending_art: HashSet::new(),
         queue: Vec::new(),
         current: 0,
@@ -744,6 +1026,7 @@ fn main() -> Result<()> {
         stream: None,
         sink: None,
         playing: false,
+        equalizer: Arc::new(eq::Settings::default()),
         album_model,
         lyrics_cache: HashMap::new(),
         lyrics_pending: HashSet::new(),
@@ -751,7 +1034,26 @@ fn main() -> Result<()> {
         lyrics_chars: 22,
         lyric_index: -1,
         now_art_pending: String::new(),
+        fm_session: None,
+        fm_generation: 0,
+        fm_started: None,
+        fm_listened: Duration::ZERO,
+        fm_done: false,
+        fm_unsent: read_json(data_path("scrobbles.json")).unwrap_or_default(),
+        fm_sending: false,
+        fm_last_retry: Instant::now(),
+        last_tick: Instant::now(),
     }));
+    {
+        let mut app = app.borrow_mut();
+        app.publish_settings(&ui);
+        app.apply_audio_settings();
+        // Show the last known library straight away while Plex refreshes it.
+        if let Some(albums) = read_json::<Vec<Entry>>(cache_path("albums.json")) {
+            app.albums = albums;
+            app.publish_albums(&ui);
+        }
+    }
 
     macro_rules! on {
         ($setter:ident, |$app:ident, $ui:ident $(, $arg:ident)*| $body:block) => {{
@@ -769,6 +1071,12 @@ fn main() -> Result<()> {
     on!(on_request_art, |app, ui, first, rows| {
         let _ = &ui;
         app.request_art(first.max(0) as usize, rows.max(1) as usize);
+    });
+    on!(on_search, |app, ui, query| {
+        if app.query != query.as_str() {
+            app.query = query.to_string();
+            app.publish_rows(&ui);
+        }
     });
     on!(on_play_album, |app, ui, shuffle| {
         let mut tracks = app.tracks.get(&app.open_album).cloned().unwrap_or_default();
@@ -794,8 +1102,8 @@ fn main() -> Result<()> {
     });
     on!(on_toggle_play, |app, ui| { app.toggle(&ui); });
     on!(on_seek, |app, ui, seconds| {
-        let _ = &ui;
         app.seek(seconds);
+        ui.set_position(seconds);
     });
     on!(on_lyrics_layout, |app, ui, chars| {
         let chars = chars.max(8) as usize;
@@ -822,6 +1130,9 @@ fn main() -> Result<()> {
         app.albums.clear();
         app.tracks.clear();
         app.queue.clear();
+        if let Some(path) = cache_path("albums.json") {
+            let _ = std::fs::remove_file(path);
+        }
         app.publish_albums(&ui);
         app.publish_libraries(&ui);
         app.publish_queue(&ui);
@@ -842,12 +1153,62 @@ fn main() -> Result<()> {
             chosen.push(key);
         }
         app.settings.libraries = if chosen.len() == plex.sections.len() { Vec::new() } else { chosen };
-        save_settings(&app.settings);
+        app.save_settings();
         app.publish_libraries(&ui);
         app.reload_plex(&ui);
     });
+    on!(on_set_columns, |app, ui, columns| {
+        app.settings.columns = columns.clamp(2, 4) as u32;
+        app.save_settings();
+        app.publish_rows(&ui);
+    });
+    on!(on_set_eq, |app, ui, preset| {
+        app.settings.eq_preset = (preset.max(0) as usize).min(eq::PRESETS.len() - 1);
+        app.save_settings();
+        app.apply_audio_settings();
+        app.publish_settings(&ui);
+    });
+    on!(on_toggle_normalizer, |app, ui| {
+        app.settings.normalizer = !app.settings.normalizer;
+        app.save_settings();
+        app.apply_audio_settings();
+        app.publish_settings(&ui);
+    });
+    on!(on_toggle_online_lyrics, |app, ui| {
+        app.settings.online_lyrics = !app.settings.online_lyrics;
+        app.save_settings();
+        app.publish_settings(&ui);
+    });
+    on!(on_open_link, |app, ui, url| {
+        let _ = (&app, &ui);
+        ios::open_url(url.as_str());
+    });
+    on!(on_fm_connect, |app, ui, key, secret| {
+        app.fm_generation += 1;
+        ui.set_fm_pending(true);
+        ui.set_fm_status("Opening Last.fm in Safari…".into());
+        let (tx, generation) = (app.tx.clone(), app.fm_generation);
+        let (key, secret) = (key.to_string(), secret.to_string());
+        thread::spawn(move || {
+            let _ = tx.send(Event::FmPending(generation, lastfm::ClientKeys::authorize(key, secret)));
+        });
+    });
+    on!(on_fm_cancel, |app, ui| {
+        app.fm_generation += 1;
+        ui.set_fm_pending(false);
+        ui.set_fm_status("".into());
+    });
+    on!(on_fm_disconnect, |app, ui| {
+        let _ = lastfm::Session::forget();
+        app.fm_generation += 1;
+        app.fm_session = None;
+        app.fm_unsent.clear();
+        app.save_unsent();
+        app.publish_lastfm(&ui);
+        ui.set_fm_status("".into());
+    });
 
-    // Restore the saved Plex sign-in in the background.
+    // Restore the saved Plex and Last.fm sign-ins in the background.
     ui.set_connecting(true);
     {
         let (tx, wanted) = (tx.clone(), app.borrow().settings.libraries.clone());
@@ -858,6 +1219,10 @@ fn main() -> Result<()> {
                 Err(error) => Event::Library(Err(error)),
             };
             let _ = tx.send(event);
+        });
+        let tx = tx.clone();
+        thread::spawn(move || {
+            let _ = tx.send(Event::FmRestored(lastfm::Session::restore().ok().flatten()));
         });
     }
 

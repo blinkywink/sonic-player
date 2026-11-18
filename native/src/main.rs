@@ -293,12 +293,12 @@ impl State {
     }
 
     fn apply_plex_connection(&mut self, ui: &Sonic, plex: Plex) {
-        ui.set_connection_type(if plex.is_local {
+        ui.set_connection_type(if plex.is_local() {
             "Local network".into()
         } else {
             "Other network".into()
         });
-        ui.set_streaming_endpoint(plex.server.to_string().trim_end_matches('/').into());
+        ui.set_streaming_endpoint(plex.server().to_string().trim_end_matches('/').into());
         self.plex = Some(plex);
         ui.set_connected(true);
     }

@@ -423,7 +423,6 @@ component LyricRow inherits Rectangle {
     in property <int> state;
     in property <float> fade: 1;
     in property <float> pulse;
-    callback jump;
     opacity: root.fade;
     if root.line.text == "": Image {
         property <length> size: 30px + (root.state == 0 ? 8px * root.pulse : 0px);
@@ -443,7 +442,6 @@ component LyricRow inherits Rectangle {
         opacity: root.state == 0 ? 1 : root.state < 0 ? 0.45 : 0.65;
         animate color, opacity { duration: 220ms; }
     }
-    if root.line.time >= 0: TouchArea { mouse-cursor: pointer; clicked => { root.jump(); } }
 }
 
 // Round translucent button with a fine highlight edge, used over the Now Playing view.
@@ -1183,7 +1181,6 @@ export component Sonic inherits Window {
                             line: line; state: index == root.lyric-index ? 0 : index < root.lyric-index ? -1 : 1;
                             fade: lyrics-panel.fade(synced.y + (line.y + line.height / 2) * 1px);
                             pulse: root.viz-levels.length > 0 ? root.viz-levels[0] : 0;
-                            jump => { if line.time >= 0 { root.seek(line.time); } }
                         }
                     }
                     if !root.lyrics-synced: plain := Flickable {
