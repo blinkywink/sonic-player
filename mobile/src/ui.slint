@@ -525,22 +525,22 @@ export component MobileApp inherits Window {
                 }
                 if root.signed-in && root.libraries.length > 1: VerticalLayout {
                     spacing: 0px;
-                    for library[index] in root.libraries: Rectangle {
+                    for choice[index] in root.libraries: Rectangle {
                         height: 44px;
                         HorizontalLayout {
                             spacing: 12px;
-                            Label { horizontal-stretch: 1; text: library.title; font-size: 16px; }
+                            Label { horizontal-stretch: 1; text: choice.title; font-size: 16px; }
                             Rectangle {
                                 width: 24px;
                                 Rectangle {
                                     width: 24px; height: 24px; border-radius: 12px;
-                                    background: library.selected ? Theme.accent : transparent;
-                                    border-width: library.selected ? 0px : 2px; border-color: Theme.muted;
-                                    if library.selected: Text { text: "✓"; color: white; font-size: 14px; horizontal-alignment: center; vertical-alignment: center; }
+                                    background: choice.selected ? Theme.accent : transparent;
+                                    border-width: choice.selected ? 0px : 2px; border-color: Theme.muted;
+                                    if choice.selected: Text { text: "✓"; color: white; font-size: 14px; horizontal-alignment: center; vertical-alignment: center; }
                                 }
                             }
                         }
-                        accessible-role: checkbox; accessible-label: library.title; accessible-checked: library.selected;
+                        accessible-role: checkbox; accessible-label: choice.title; accessible-checked: choice.selected;
                         accessible-action-default => { root.toggle-library(index); }
                         TouchArea { clicked => { root.toggle-library(index); } }
                     }
@@ -709,7 +709,7 @@ export component MobileApp inherits Window {
     sheet := Rectangle {
         x: 0; width: parent.width; height: parent.height;
         y: (root.player-open ? 0px : parent.height + 40px) + root.sheet-drag;
-        animate y { duration: root.sheet-dragging ? 0ms : 320ms; easing: ease-out-cubic; }
+        animate y { duration: root.sheet-dragging ? 0ms : 320ms; easing: ease-out-quart; }
         background: Theme.background;
         clip: true;
         // Soft backdrop from the cover.

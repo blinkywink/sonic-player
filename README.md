@@ -34,11 +34,15 @@ Linux and macOS downloads are on the same [releases page](https://github.com/bli
 
 ## iPhone (sideload, preview)
 
-A lean iPhone version lives in `mobile/`: your album grid, an album's songs, playback with a simple queue, a Now Playing tab with synced lyrics, and Plex settings (including which music libraries to show). It shares Sonic's Plex, streaming and lyrics code.
+A lean iPhone version lives in `mobile/`: your albums sorted A–Z by artist with search (2, 3 or 4 per row), an album's songs, a full-screen player (tap the mini player; swipe down to close), a simple queue (swipe a song left to remove it), synced lyrics, lock screen and headphone controls with artwork, Last.fm scrobbling, EQ presets, volume leveling, and Plex settings. Swipe in from the left edge to go back. It shares Sonic's Plex, streaming, lyrics, EQ and Last.fm code.
 
-Download `sonic-ios-unsigned.ipa` from the [latest release](https://github.com/blinkywink/sonic-player/releases/latest) (or the `sonic-ios-unsigned` build artifact) and install it with your sideloading tool, which signs it with your Apple ID. It's built on GitHub's macOS runners, so no Mac is needed. Sign in with Plex in the Settings tab; on your home network, allow Sonic's local network access so it can reach your server.
+Download `sonic-ios-unsigned.ipa` from the [latest release](https://github.com/blinkywink/sonic-player/releases/latest) (or the `sonic-ios-unsigned` build artifact) and install it with your sideloading tool, which signs it with your Apple ID. It's built on GitHub's macOS runners, so no Mac is needed. Sign in with Plex in the Settings tab; on your home network, allow Sonic's local network access so it can reach your server. The newest IPA is always at `https://github.com/blinkywink/sonic-player/releases/latest/download/sonic-ios-unsigned.ipa`.
 
 To try the phone UI on a desktop: `cargo run --release --manifest-path mobile/Cargo.toml` (it opens a phone-sized window and shows your local music folder when you're not signed in).
+
+## Away from home
+
+Sonic tries all of your Plex server's addresses at once and uses the best one that answers: your home network, then a direct remote connection, then Plex's relay. If the network changes (say you leave home), it finds a new address on its own. For fast remote playback, turn on **Remote Access** in your Plex server's settings and, if you forwarded a custom port, enter it there as the manual public port; otherwise Sonic falls back to Plex's slower relay.
 
 ## Build from source
 
