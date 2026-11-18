@@ -40,6 +40,38 @@ unsafe impl Encode for CGSize {
 /// Commands from the system controls, picked up by the app's timer.
 static COMMANDS: Mutex<Vec<Remote>> = Mutex::new(Vec::new());
 
+/// Links to open in Safari; UIKit must be called on the main thread.
+static URLS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// Opens a link in Safari (callable from any thread).
+pub fn open_url(url: &str) {
+    if let Ok(mut urls) = URLS.lock() {
+        urls.push(url.to_owned());
+    }
+}
+
+/// Opens queued links; called from the main thread's timer.
+pub fn open_pending() {
+    let urls = URLS.lock().map(|mut urls| std::mem::take(&mut *urls)).unwrap_or_default();
+    let (Some(app_class), Some(url_class), Some(dict_class)) =
+        (class(c"UIApplication"), class(c"NSURL"), class(c"NSDictionary"))
+    else {
+        return;
+    };
+    for url in urls {
+        unsafe {
+            let app: *mut AnyObject = msg_send![app_class, sharedApplication];
+            let link: Option<Retained<AnyObject>> = msg_send![url_class, URLWithString: &*NSString::from_str(&url)];
+            let options: Option<Retained<AnyObject>> = msg_send![dict_class, dictionary];
+            let (Some(link), Some(options)) = (link, options) else { continue };
+            if app.is_null() {
+                continue;
+            }
+            let _: () = msg_send![app, openURL: &*link, options: &*options, completionHandler: null_mut::<AnyObject>()];
+        }
+    }
+}
+
 thread_local! {
     /// The lock screen artwork and the album it belongs to.
     static ARTWORK: RefCell<Option<(String, Retained<AnyObject>)>> = const { RefCell::new(None) };

@@ -406,6 +406,13 @@ export component MobileApp inherits Window {
         }
     }
 
+    // Taps just beside or below the tab bar count for the icon above them.
+    HorizontalLayout {
+        x: 0; width: parent.width;
+        y: parent.height - root.tab-gap - 58px; height: root.tab-gap + 58px;
+        for screen in [0, 4, 2, 3]: TouchArea { clicked => { root.screen = screen; } }
+    }
+
     // ---- Tab bar: a floating glass capsule, icons only ----
     Rectangle {
         x: 14px; width: parent.width - 28px; height: 58px;

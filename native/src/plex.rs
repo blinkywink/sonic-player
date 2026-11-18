@@ -173,6 +173,10 @@ impl Plex {
         let mut auth = Url::parse("https://app.plex.tv/auth/")?;
         let query = url_query(&client_id, &pin.code);
         auth.set_fragment(Some(&format!("!?{query}")));
+        // On iPhone the `open` crate needs a jailbreak tool; use UIKit instead.
+        #[cfg(target_os = "ios")]
+        crate::ios::open_url(auth.as_str());
+        #[cfg(not(target_os = "ios"))]
         open::that_detached(auth.as_str()).context("Opening Plex sign-in")?;
         let deadline = Instant::now() + Duration::from_secs(180);
         let account_token = loop {

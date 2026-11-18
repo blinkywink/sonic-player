@@ -20,6 +20,7 @@ mod ios {
     }
     pub fn set_artwork(_key: &str, _bytes: &[u8]) {}
     pub fn now_playing(_info: Option<&NowPlaying>) {}
+    pub fn open_pending() {}
 }
 #[cfg(not(target_os = "ios"))]
 #[path = "../../native/src/local.rs"]
@@ -872,6 +873,7 @@ fn main() -> Result<()> {
                 started = true;
                 ios::start_remote_commands();
             }
+            ios::open_pending();
             for command in ios::take_commands() {
                 app.remote(&ui, command);
             }
