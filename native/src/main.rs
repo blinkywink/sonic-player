@@ -3867,8 +3867,28 @@ fn main() -> Result<()> {
             .load_queue(&ui, &startup_tx, tracks, 0);
         ui.set_page(2);
     }
+    // Show "Restart to update" once a new version has been downloaded.
+    let update_timer = Timer::default();
+    {
+        let weak = ui.as_weak();
+        update_timer.start(TimerMode::Repeated, Duration::from_secs(5), move || {
+            if let (Some(ui), Some(version)) = (weak.upgrade(), update::ready())
+                && ui.get_update_ready().as_str() != version
+            {
+                ui.set_update_ready(version.into());
+            }
+        });
+    }
+    ui.on_restart_to_update(|| {
+        update::request_restart();
+        let _ = slint::quit_event_loop();
+    });
     ui.run()?;
     exit_state.borrow_mut().flush_session(&ui, true)?;
+    // Let go of the single-instance lock (owned by the main timer) first so the
+    // new copy can start.
+    drop(timer);
+    update::relaunch_if_requested();
     Ok(())
 }
 

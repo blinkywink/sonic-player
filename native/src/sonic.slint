@@ -682,6 +682,9 @@ export component Sonic inherits Window {
     callback toggle-online-lyrics;
     in property <[PlexLibrary]> plex-libraries;
     in property <string> app-version;
+    // A downloaded update waiting for a restart ("" = none).
+    in property <string> update-ready;
+    callback restart-to-update;
     callback toggle-plex-library(int);
     // Playlist pending deletion confirmation (-1 = none).
     property <int> delete-playlist-index: -1;
@@ -768,6 +771,10 @@ export component Sonic inherits Window {
                     IconButton { width: parent.size; label: "Queue"; icon: @image-url("icons/queue.svg"); selected: root.page == 2; clicked => { root.page = 2; } }
                     IconButton { width: parent.size; label: "Playlists"; icon: @image-url("icons/playlists.svg"); selected: root.page == 3; clicked => { root.page = 3; } }
                     IconButton { width: parent.size; label: "Settings"; icon: @image-url("icons/settings.svg"); selected: root.page == 4; clicked => { root.page = 4; } }
+                }
+                if root.update-ready != "": Action {
+                    label: "Restart to update to " + root.update-ready; active: true; font-size: 13px; text-weight: 600;
+                    clicked => { root.restart-to-update(); }
                 }
                 if root.selected-key != "": VerticalLayout {
                     spacing: 8px; padding-bottom: 12px;

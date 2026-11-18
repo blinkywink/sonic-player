@@ -1,11 +1,43 @@
 //! Self-update from GitHub Releases (Windows). In the background, Sonic checks the
 //! latest release; if it is newer, the new sonicplayer.exe is downloaded next to the
-//! running one and swapped in, so the next launch runs the new version. Nothing is
-//! shown and nothing is interrupted.
+//! running one and swapped in. The app then offers "Restart to update"; otherwise the
+//! next launch runs the new version.
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
-use std::{io::Read, path::Path, thread, time::Duration};
+use std::{
+    io::Read,
+    path::Path,
+    sync::{
+        Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+    thread,
+    time::Duration,
+};
+
+/// The version that has been installed and runs on the next start.
+static READY: Mutex<Option<String>> = Mutex::new(None);
+static RESTART: AtomicBool = AtomicBool::new(false);
+
+/// The downloaded version waiting for a restart, if any.
+pub fn ready() -> Option<String> {
+    READY.lock().ok().and_then(|ready| ready.clone())
+}
+
+/// Asks for Sonic to start again (the new version) once it has shut down.
+pub fn request_restart() {
+    RESTART.store(true, Ordering::Relaxed);
+}
+
+/// Call after the app has saved and released its single-instance lock.
+pub fn relaunch_if_requested() {
+    if RESTART.load(Ordering::Relaxed)
+        && let Ok(exe) = std::env::current_exe()
+    {
+        let _ = std::process::Command::new(exe).spawn();
+    }
+}
 
 const LATEST: &str = "https://api.github.com/repos/blinkywink/sonic-player/releases/latest";
 const ASSET: &str = "sonicplayer-windows-x64.exe";
@@ -46,10 +78,10 @@ pub fn start() {
         return;
     }
     thread::spawn(move || {
-        thread::sleep(Duration::from_secs(20));
+        thread::sleep(Duration::from_secs(5));
         loop {
             match check_and_install(&exe) {
-                Ok(true) => return, // Installed; it takes effect on the next launch.
+                Ok(true) => return, // Installed; offered as "Restart to update".
                 Ok(false) => {}
                 Err(error) => eprintln!("Sonic update check failed: {error:#}"),
             }
@@ -104,6 +136,9 @@ fn check_and_install(exe: &Path) -> Result<bool> {
     if let Err(error) = std::fs::rename(&staged, exe) {
         let _ = std::fs::rename(&old, exe);
         return Err(error).context("Installing update");
+    }
+    if let Ok(mut ready) = READY.lock() {
+        *ready = Some(release.tag_name.trim_start_matches('v').to_owned());
     }
     Ok(true)
 }
