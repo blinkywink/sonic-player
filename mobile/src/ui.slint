@@ -373,11 +373,11 @@ export component MobileApp inherits Window {
         }
         // Swipe in from the left edge to leave a search.
         if search-input.text != "": TouchArea {
-            x: 0; width: 20px; y: root.top-inset + 56px; height: parent.height - self.y;
+            x: 0; width: 34px; y: root.top-inset + 56px; height: parent.height - self.y;
             property <bool> done;
             pointer-event(event) => { if event.kind == PointerEventKind.down { self.done = false; } }
             moved => {
-                if !self.done && self.mouse-x - self.pressed-x > 70px {
+                if !self.done && self.mouse-x - self.pressed-x > 50px {
                     self.done = true;
                     search-input.text = ""; search-input.clear-focus(); root.search("");
                 }
@@ -448,9 +448,9 @@ export component MobileApp inherits Window {
             label: "Back to Library"; icon: @image-url("icons/chevron-left.svg"); icon-size: 22px;
             clicked => { root.screen = 0; }
         }
-        // Edge swipe: the page follows your finger; let go past a third to go back.
+        // Edge swipe: the page follows your finger; a short swipe (60 px) goes back.
         TouchArea {
-            x: 0; width: 22px; y: root.top-inset + 52px; height: parent.height - self.y;
+            x: 0; width: 34px; y: root.top-inset + 52px; height: parent.height - self.y;
             property <length> press;
             pointer-event(event) => {
                 if event.kind == PointerEventKind.down {
@@ -458,7 +458,7 @@ export component MobileApp inherits Window {
                     root.back-dragging = true;
                 } else if event.kind == PointerEventKind.up || event.kind == PointerEventKind.cancel {
                     root.back-dragging = false;
-                    if root.back-drag > root.width / 3 {
+                    if root.back-drag > 60px {
                         root.back-drag = 0px;
                         root.screen = 0;
                     } else {
