@@ -105,6 +105,16 @@ impl Tray {
     }
 }
 
+/// Whether Sonic's window is on screen (not hidden in the tray or minimized).
+pub fn window_shown(ui: &crate::Sonic) -> bool {
+    let handle = ui.window().window_handle();
+    let Some(RawWindowHandle::Win32(handle)) = handle.window_handle().ok().map(|h| h.as_raw()) else {
+        return true;
+    };
+    let hwnd = handle.hwnd.get() as HWND;
+    unsafe { IsWindowVisible(hwnd) != 0 && IsIconic(hwnd) == 0 }
+}
+
 /// Sets the window's big and small icons. The taskbar and Alt+Tab use the big one;
 /// without it Windows shows its cached copy of the .exe icon, which can be stale after
 /// an update. Returns false until the native window exists, so the caller can retry.

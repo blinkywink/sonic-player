@@ -1788,8 +1788,12 @@ fn load_audio(plex: Option<Plex>, track: Entry, cancel: Arc<AtomicBool>) -> Resu
     })
 }
 
+/// Album covers in grids and lists. 320 px is sharper than any tile at 150% scaling
+/// and keeps the cover cache small; Now Playing loads its own larger copy.
+const THUMB_SIZE: u32 = 320;
+
 fn cover(plex: &Plex, thumb: &str) -> Option<Art> {
-    cover_at_size(plex, thumb, 400)
+    cover_at_size(plex, thumb, THUMB_SIZE)
 }
 
 fn cover_at_size(plex: &Plex, thumb: &str, size: u32) -> Option<Art> {
@@ -1815,7 +1819,7 @@ fn cover_at_size(plex: &Plex, thumb: &str, size: u32) -> Option<Art> {
 }
 
 fn decode_cover(data: &[u8]) -> Option<Art> {
-    decode_cover_at_size(data, 400)
+    decode_cover_at_size(data, THUMB_SIZE)
 }
 
 fn decode_cover_at_size(data: &[u8], size: u32) -> Option<Art> {
@@ -1829,7 +1833,8 @@ fn decode_cover_at_size(data: &[u8], size: u32) -> Option<Art> {
     let image = reader.decode().ok()?;
     let pixels = if image.width().max(image.height()) > size {
         image
-            .resize(size, size, image::imageops::FilterType::Lanczos3)
+            // Triangle is several times faster than Lanczos and looks the same when shrinking.
+            .resize(size, size, image::imageops::FilterType::Triangle)
             .into_rgba8()
     } else {
         image.into_rgba8()
@@ -2305,6 +2310,13 @@ fn sampled_theme(image: &Art) -> Option<[u8; 3]> {
     // so every album lands in a similar, calm range.
     let saturation = if vivid { (saturation * 0.5).clamp(0.22, 0.42) } else { saturation.min(0.3) };
     Some(from_hsl(hue, saturation.min(0.4), lightness.clamp(0.09, 0.15)))
+}
+
+fn window_on_screen(ui: &Sonic) -> bool {
+    #[cfg(windows)]
+    return desktop::window_shown(ui);
+    #[cfg(not(windows))]
+    return !ui.window().is_minimized();
 }
 
 fn clock(seconds: u64) -> String {
@@ -3571,7 +3583,8 @@ fn main() -> Result<()> {
         let mut shown = [0.0f32; 4];
         viz_timer.start(TimerMode::Repeated, Duration::from_millis(50), move || {
             let Some(ui) = weak.upgrade() else { return };
-            if !ui.get_playing() {
+            // Nothing to animate while paused or while the window is in the tray/minimized.
+            if !ui.get_playing() || !window_on_screen(&ui) {
                 return;
             }
             let Ok(state) = state.try_borrow() else { return };
@@ -3594,21 +3607,27 @@ fn main() -> Result<()> {
     let mut media = media::Media::default();
     let weak = ui.as_weak();
     #[cfg(windows)]
-    let tray = {
-        ui.show()?;
-        desktop::Tray::attach(&ui)
-    };
+    ui.show()?;
+    // The native window only exists once the event loop runs, so the tray (which also
+    // provides close-to-tray and restoring the window from a second launch) and the
+    // window icons are set up on the first timer tick that has a window handle.
+    #[cfg(windows)]
+    let mut tray: Option<desktop::Tray> = None;
     #[cfg(windows)]
     let mut window_icons_set = false;
     timer.start(TimerMode::Repeated, Duration::from_millis(120), move || {
-        #[cfg(windows)]
-        if let Some(tray) = &tray {
-            instance.activate_if_requested(tray);
-        }
         let Some(ui) = weak.upgrade() else { return };
         #[cfg(windows)]
-        if !window_icons_set {
-            window_icons_set = desktop::set_window_icons(&ui);
+        {
+            if tray.is_none() {
+                tray = desktop::Tray::attach(&ui);
+            }
+            if let Some(tray) = &tray {
+                instance.activate_if_requested(tray);
+            }
+            if !window_icons_set {
+                window_icons_set = desktop::set_window_icons(&ui);
+            }
         }
         let mut state = state.borrow_mut();
         let now = Instant::now();
