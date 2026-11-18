@@ -16,13 +16,21 @@ A native Plex and local music player built with Rust, Slint, and Rodio. Browse a
 
 ## Run on Windows
 
-Open a successful [Windows build](https://github.com/blinkywink/sonic-player/actions/workflows/build.yml) and download the `sonicplayer-windows-x64` artifact. Extract it and run `sonicplayer.exe`.
+Download `sonicplayer-windows-x64.zip` from the [latest release](https://github.com/blinkywink/sonic-player/releases/latest), extract it, and run `sonicplayer.exe`.
 
-- **Plex:** Open **Settings → Library → Sign in with Plex**, approve Sonic in your browser, then return to the app.
+- **Plex:** Open **Settings → Library → Sign in with Plex**, approve Sonic in your browser, then return to the app. If your server has several music libraries, choose which ones to show under the Plex account.
 - **Local music:** Enable local files in **Settings → Library**, put music in the `SonicMusic` folder, and refresh. You can also pass audio file paths when launching Sonic.
 - **Discord and Last.fm:** Both are under **Settings → Tracking**. Discord uses an Application ID and an optional image asset key. Last.fm uses an API key and secret, followed by browser approval.
 
 On Windows, the Sonic tray menu has **Open Sonic**, **Run at startup**, and **Quit**. Closing the window keeps the player in the tray.
+
+## Run on Linux or macOS (preview)
+
+Linux and macOS downloads are on the same [releases page](https://github.com/blinkywink/sonic-player/releases/latest). Both are new and less tested than Windows.
+
+- **Linux (x64):** download `sonicplayer-linux-x64.tar.gz`, extract it, and run `./install.sh` to add Sonic to your app launcher (no root needed), or run `./sonicplayer` directly. Needs ALSA (or PipeWire/PulseAudio with the ALSA plugin). Media keys work through MPRIS.
+- **macOS (Apple Silicon):** download `sonicplayer-macos-arm64.zip`, unzip, and move **Sonic.app** to Applications. The app isn't notarized, so the first time, right-click it and choose **Open**.
+- On both, closing the window quits Sonic (there's no tray yet), and the theme swatch doesn't open a color picker, so type a hex color instead.
 
 ## Build from source
 
@@ -33,6 +41,17 @@ cargo build --release --locked --manifest-path native/Cargo.toml
 cargo test --release --locked --manifest-path native/Cargo.toml
 ```
 
-The executable is at `native/target/release/sonicplayer.exe`. Windows is the verified build target. macOS and Linux still need runtime verification.
+The executable is at `native/target/release/sonicplayer.exe`. On Linux, install the ALSA, xkbcommon and fontconfig development packages first (for example `sudo apt install pkg-config libasound2-dev libxkbcommon-dev libfontconfig1-dev`). Windows is the most tested platform; Linux and macOS build and pass tests in CI but still need more real-world use.
 
 The [previous Electron client](https://github.com/blinkywink/sonic-player/tree/80a1ecb) is available in Git history.
+
+## Releases
+
+Every push to `main` builds and tests Windows, Linux and macOS ([workflow](https://github.com/blinkywink/sonic-player/actions/workflows/build.yml)). To publish a release, bump `version` in `native/Cargo.toml`, commit, then push a matching tag:
+
+```sh
+git tag v0.2.0
+git push origin v0.2.0
+```
+
+The workflow checks the tag matches the version and attaches the three downloads to a new GitHub Release.

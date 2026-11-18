@@ -38,6 +38,8 @@ pub struct Preferences {
     pub streaming_remote: i32,
     /// Look up lyrics on LRCLIB when a track has none of its own.
     pub online_lyrics: bool,
+    /// Plex music libraries to show (section keys); empty shows all of them.
+    pub plex_libraries: Vec<String>,
 }
 
 impl Default for Preferences {
@@ -65,6 +67,7 @@ impl Default for Preferences {
             streaming_local: 2,
             streaming_remote: 2,
             online_lyrics: true,
+            plex_libraries: Vec::new(),
         }
     }
 }

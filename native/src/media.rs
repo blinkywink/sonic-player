@@ -34,7 +34,9 @@ impl Media {
                 .then(|| cover_file(ui))
                 .flatten();
             if track.rating_key != self.key || cover.is_some() {
-                let url = cover.as_ref().map(|path| format!("file://{}", path.display()));
+                let url = cover
+                    .as_ref()
+                    .map(|path| format!("file://{}", path.display()));
                 let metadata = MediaMetadata {
                     title: Some(&track.title),
                     artist: Some(&track.grandparent_title),
@@ -77,7 +79,14 @@ fn cover_file(ui: &Sonic) -> Option<std::path::PathBuf> {
         return None;
     }
     let path = std::env::temp_dir().join(format!("sonic-cover-{}.png", std::process::id()));
-    image::save_buffer(&path, art.as_bytes(), art.width(), art.height(), image::ColorType::Rgba8).ok()?;
+    image::save_buffer(
+        &path,
+        art.as_bytes(),
+        art.width(),
+        art.height(),
+        image::ColorType::Rgba8,
+    )
+    .ok()?;
     Some(path)
 }
 

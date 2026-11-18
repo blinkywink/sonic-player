@@ -8,6 +8,7 @@ export struct QueueTrack { title: string, artist: string, album: string, album-k
 export struct SongHit { album-key: string, track-index: int, number: int, title: string, description: string, time: string, art: image, }
 export struct QueueLine { index: int, height: int, gap: int, grouped: bool, track: QueueTrack, number: int, }
 export struct LyricLine { text: string, time: float, y: float, height: float, }
+export struct PlexLibrary { title: string, selected: bool, }
 export struct MenuEntry { label: string, icon: image, danger: bool, }
 
 export global Palette {
@@ -681,6 +682,9 @@ export component Sonic inherits Window {
     in-out property <bool> online-lyrics: true;
     callback lyrics-layout(int);
     callback toggle-online-lyrics;
+    in property <[PlexLibrary]> plex-libraries;
+    in property <string> app-version;
+    callback toggle-plex-library(int);
     // Playlist pending deletion confirmation (-1 = none).
     property <int> delete-playlist-index: -1;
     property <bool> playlist-options;
@@ -1557,6 +1561,7 @@ export component Sonic inherits Window {
                             active: root.settings-tab == index;
                             clicked => { root.settings-tab = index; }
                         }
+                        Label { text: "Sonic " + root.app-version; font-size: 12px; color: Palette.muted; width: 90px; horizontal-alignment: right; }
                     }
                     if root.settings-tab == 0: SettingsCard {
                         Label { text: "Parametric EQ & normalization"; font-weight: 700; font-size: 16px; height: 23px; }
@@ -1734,6 +1739,31 @@ export component Sonic inherits Window {
                             label: root.connected ? "Sign out of Plex" : root.connecting ? "Connecting…" : "Sign in with Plex";
                             active: true;
                             clicked => { if root.connected { root.sign-out(); } else if !root.connecting { root.sign-in(); } }
+                        }
+                        // Pick which music libraries to show when the server has several.
+                        if root.connected && root.plex-libraries.length > 1: VerticalLayout {
+                            spacing: 8px; padding-top: 6px;
+                            Label { text: "Music libraries"; font-size: 13px; font-weight: 600; height: 18px; }
+                            Label { text: "Choose which libraries appear in Music."; font-size: 12px; color: Palette.muted; height: 16px; }
+                            for library[index] in root.plex-libraries: Rectangle {
+                                height: 26px;
+                                accessible-role: checkbox; accessible-label: library.title;
+                                accessible-checked: library.selected;
+                                accessible-action-default => { root.toggle-plex-library(index); }
+                                HorizontalLayout {
+                                    spacing: 10px; alignment: start;
+                                    Rectangle {
+                                        width: 22px;
+                                        Rectangle {
+                                            width: 17px; height: 17px; border-radius: 5px; border-width: 1px; border-color: Palette.muted;
+                                            background: library.selected ? Palette.selected : Palette.glass;
+                                            if library.selected: Text { text: "✓"; color: Palette.text; font-size: 12px; horizontal-alignment: center; vertical-alignment: center; }
+                                        }
+                                    }
+                                    Label { text: library.title; font-size: 13px; }
+                                }
+                                TouchArea { mouse-cursor: pointer; clicked => { root.toggle-plex-library(index); } }
+                            }
                         }
                     }
                     if root.settings-tab == 2: SettingsCard {

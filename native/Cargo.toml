@@ -1,7 +1,9 @@
 [package]
 name = "sonicplayer"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
+description = "Sonic: a native Plex and local music player"
+repository = "https://github.com/blinkywink/sonic-player"
 
 [dependencies]
 slint = { version = "1.19", default-features = false, features = ["std", "backend-winit", "renderer-software", "compat-1-2", "image-default-formats", "raw-window-handle-06"] }

@@ -16,6 +16,8 @@ pub struct Plex {
     pub server: Url,
     token: String,
     pub library: String,
+    /// Every music library on the server as (key, title), in server order.
+    pub sections: Vec<(String, String)>,
     pub server_id: String,
     pub is_local: bool,
 }
@@ -111,6 +113,8 @@ struct Sections {
 #[derive(Deserialize)]
 struct Section {
     key: String,
+    #[serde(default)]
+    title: String,
     #[serde(rename = "type")]
     kind: String,
 }
@@ -234,6 +238,7 @@ impl Plex {
                     server: connection.uri,
                     token: token.clone(),
                     library: String::new(),
+                    sections: Vec::new(),
                     server_id: device.client_identifier.clone(),
                     is_local: connection.local,
                 };
@@ -243,14 +248,22 @@ impl Plex {
                         .error_for_status()?
                         .json::<Envelope<Sections>>()?)
                 });
-                if let Ok(sections) = sections
-                    && let Some(section) = sections.container.directories.into_iter().find(|s| {
-                        matches!(s.kind.as_str(), "artist" | "music")
-                            && current.is_none_or(|(_, library)| s.key == library)
-                    })
-                {
-                    plex.library = section.key;
-                    return Ok(plex);
+                if let Ok(sections) = sections {
+                    let music: Vec<Section> = sections
+                        .container
+                        .directories
+                        .into_iter()
+                        .filter(|s| matches!(s.kind.as_str(), "artist" | "music"))
+                        .collect();
+                    if let Some(section) = music
+                        .iter()
+                        .find(|s| current.is_none_or(|(_, library)| s.key == library))
+                        .or(music.first())
+                    {
+                        plex.library = section.key.clone();
+                        plex.sections = music.into_iter().map(|s| (s.key, s.title)).collect();
+                        return Ok(plex);
+                    }
                 }
             }
         }
@@ -268,12 +281,48 @@ impl Plex {
         )
     }
 
-    pub fn albums(&self) -> Result<Vec<Entry>> {
+    /// Library keys to load: the wanted ones that still exist, or every music library
+    /// when nothing is chosen (or none of the chosen ones are left).
+    pub fn chosen_sections(&self, wanted: &[String]) -> Vec<String> {
+        let keys: Vec<String> = self
+            .sections
+            .iter()
+            .map(|(key, _)| key.clone())
+            .filter(|key| wanted.contains(key))
+            .collect();
+        if keys.is_empty() {
+            self.sections.iter().map(|(key, _)| key.clone()).collect()
+        } else {
+            keys
+        }
+    }
+
+    /// Albums from the chosen music libraries, without duplicates.
+    pub fn albums(&self, wanted: &[String]) -> Result<Vec<Entry>> {
+        let mut seen = std::collections::HashSet::new();
+        let mut all = Vec::new();
+        let sections = self.chosen_sections(wanted);
+        let sections = if sections.is_empty() {
+            vec![self.library.clone()]
+        } else {
+            sections
+        };
+        for section in sections {
+            for album in self.section_albums(&section)? {
+                if seen.insert(album.rating_key.clone()) {
+                    all.push(album);
+                }
+            }
+        }
+        Ok(all)
+    }
+
+    fn section_albums(&self, section: &str) -> Result<Vec<Entry>> {
         let mut entries = Vec::new();
         loop {
             let start = entries.len().to_string();
             let page = self
-                .request(&format!("/library/sections/{}/all", self.library))?
+                .request(&format!("/library/sections/{section}/all"))?
                 .query(&[
                     ("type", "9"),
                     ("sort", "titleSort"),
@@ -334,4 +383,42 @@ fn url_query(id: &str, code: &str) -> String {
         .append_pair("code", code)
         .append_pair("context[device][product]", "Sonic");
     url.query().unwrap_or_default().to_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn server(sections: &[(&str, &str)]) -> Plex {
+        Plex {
+            http: Client::new(),
+            account: Account {
+                token: String::new(),
+                client_id: String::new(),
+            },
+            server: Url::parse("http://127.0.0.1:32400").unwrap(),
+            token: String::new(),
+            library: sections
+                .first()
+                .map(|(key, _)| key.to_string())
+                .unwrap_or_default(),
+            sections: sections
+                .iter()
+                .map(|(k, t)| (k.to_string(), t.to_string()))
+                .collect(),
+            server_id: String::new(),
+            is_local: true,
+        }
+    }
+
+    #[test]
+    fn library_choice_defaults_to_all_and_ignores_removed_libraries() {
+        let plex = server(&[("1", "Music"), ("4", "Soundtracks"), ("7", "Live")]);
+        let all = vec!["1".to_string(), "4".to_string(), "7".to_string()];
+        assert_eq!(plex.chosen_sections(&[]), all);
+        assert_eq!(plex.chosen_sections(&["7".into(), "1".into()]), ["1", "7"]);
+        // A saved library that no longer exists is dropped; if none remain, show all.
+        assert_eq!(plex.chosen_sections(&["4".into(), "9".into()]), ["4"]);
+        assert_eq!(plex.chosen_sections(&["9".into()]), all);
+    }
 }

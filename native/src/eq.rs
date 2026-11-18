@@ -81,7 +81,9 @@ impl Settings {
     }
 
     pub fn levels(&self) -> [f32; 4] {
-        self.levels.each_ref().map(|level| f32::from_bits(level.load(Ordering::Relaxed)))
+        self.levels
+            .each_ref()
+            .map(|level| f32::from_bits(level.load(Ordering::Relaxed)))
     }
 
     pub fn update(&self, gains: &[f32; 20], preamp: f32) {
@@ -170,7 +172,8 @@ impl Meter {
 
     fn reset(&mut self, rate: u32) {
         *self = Self {
-            coefficients: Self::CUTOFFS.map(|cutoff| 1.0 - (-TAU * cutoff / rate.max(1) as f32).exp()),
+            coefficients: Self::CUTOFFS
+                .map(|cutoff| 1.0 - (-TAU * cutoff / rate.max(1) as f32).exp()),
             window: (rate / 40).max(1),
             ..Self::default()
         };
@@ -192,7 +195,10 @@ impl Meter {
         self.frames += 1;
         if self.frames >= self.window {
             for (level, energy) in levels.iter().zip(&mut self.energy) {
-                level.store((*energy / self.frames as f32).sqrt().to_bits(), Ordering::Relaxed);
+                level.store(
+                    (*energy / self.frames as f32).sqrt().to_bits(),
+                    Ordering::Relaxed,
+                );
                 *energy = 0.0;
             }
             self.frames = 0;
@@ -300,7 +306,11 @@ impl<S: Source> Iterator for Equalizer<S> {
         // Apply the user gain after normalization so compression can't undo it.
         let output = sample * self.preamp * self.fade;
         if self.channel == 0 {
-            let target = if self.settings.seeking.load(Ordering::Relaxed) { 0.0 } else { 1.0 };
+            let target = if self.settings.seeking.load(Ordering::Relaxed) {
+                0.0
+            } else {
+                1.0
+            };
             self.fade += (target - self.fade).clamp(-self.fade_step, self.fade_step);
             // Meter one channel per frame; enough for a visual level.
             self.meter.push(output, &self.settings.levels);
@@ -359,13 +369,21 @@ mod tests {
         settings.begin_seek();
         let faded: Vec<f32> = playing.by_ref().take(1_000).collect();
         // Monotonic fade with small steps, reaching silence within ~12 ms.
-        assert!(faded.windows(2).all(|pair| pair[1] <= pair[0] && pair[0] - pair[1] < 0.01));
+        assert!(
+            faded
+                .windows(2)
+                .all(|pair| pair[1] <= pair[0] && pair[0] - pair[1] < 0.01)
+        );
         assert_eq!(*faded.last().unwrap(), 0.0);
         playing.try_seek(Duration::from_millis(100)).unwrap();
         settings.end_seek();
         let resumed: Vec<f32> = playing.by_ref().take(1_000).collect();
         assert!(resumed[0] < 0.01);
-        assert!(resumed.windows(2).all(|pair| pair[1] >= pair[0] && pair[1] - pair[0] < 0.01));
+        assert!(
+            resumed
+                .windows(2)
+                .all(|pair| pair[1] >= pair[0] && pair[1] - pair[0] < 0.01)
+        );
         assert!((resumed.last().unwrap() - 0.5).abs() < 1e-6);
     }
 

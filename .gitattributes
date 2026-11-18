@@ -1,0 +1,5 @@
+# Scripts and packaging files run on Linux/macOS: keep Unix line endings.
+*.sh text eol=lf
+*.desktop text eol=lf
+*.plist text eol=lf
+*.yml text eol=lf

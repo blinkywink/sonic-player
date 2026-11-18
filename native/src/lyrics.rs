@@ -37,7 +37,10 @@ pub fn parse(source: &str) -> Vec<Line> {
                 plain.push(Line { time: None, text });
             }
         } else {
-            synced.extend(stamps.into_iter().map(|time| Line { time: Some(time), text: text.clone() }));
+            synced.extend(stamps.into_iter().map(|time| Line {
+                time: Some(time),
+                text: text.clone(),
+            }));
         }
     }
     if synced.is_empty() {
@@ -55,10 +58,16 @@ const BREAK: f32 = 4.0;
 /// Keeps empty timed lines only where the music plays on for a while (they become
 /// music markers, with empty text) and adds one for a long intro; short spacers go.
 fn music_breaks(lines: Vec<Line>) -> Vec<Line> {
-    let first_sung = lines.iter().find(|l| !l.text.is_empty()).and_then(|l| l.time);
+    let first_sung = lines
+        .iter()
+        .find(|l| !l.text.is_empty())
+        .and_then(|l| l.time);
     let mut out = Vec::with_capacity(lines.len() + 1);
     if first_sung.is_some_and(|t| t >= BREAK + 1.0) {
-        out.push(Line { time: Some(0.0), text: String::new() });
+        out.push(Line {
+            time: Some(0.0),
+            text: String::new(),
+        });
     }
     for (index, line) in lines.iter().enumerate() {
         if line.text.is_empty() {
@@ -86,7 +95,9 @@ fn strip_word_stamps(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(start) = rest.find('<') {
-        let Some(end) = rest[start..].find('>') else { break };
+        let Some(end) = rest[start..].find('>') else {
+            break;
+        };
         if stamp(&rest[start + 1..start + end]).is_none() {
             out.push_str(&rest[..start + end + 1]);
         } else {
@@ -206,7 +217,11 @@ fn lrclib(track: &Entry) -> Option<Vec<Line>> {
         .and_then(|response| response.json::<Vec<Record>>().ok())?;
     results
         .iter()
-        .find(|r| r.synced_lyrics.as_deref().is_some_and(|s| !s.trim().is_empty()))
+        .find(|r| {
+            r.synced_lyrics
+                .as_deref()
+                .is_some_and(|s| !s.trim().is_empty())
+        })
         .or_else(|| results.first())
         .and_then(Record::lines)
 }
@@ -222,7 +237,11 @@ pub fn layout(lines: &[Line], chars: usize) -> Vec<(f32, f32)> {
     lines
         .iter()
         .map(|line| {
-            let rows = if line.text.is_empty() { 0 } else { wrapped_rows(&line.text, chars) };
+            let rows = if line.text.is_empty() {
+                0
+            } else {
+                wrapped_rows(&line.text, chars)
+            };
             // Empty lines are music-break markers.
             let height = if rows == 0 { ROW } else { rows as f32 * ROW };
             let slot = (y, height);
@@ -254,7 +273,8 @@ mod tests {
 
     #[test]
     fn parses_synced_lrc_with_metadata_and_repeated_stamps() {
-        let lines = parse("[ar:Someone]\n[00:01.50]Hello\n[00:10.00][00:20.25]Chorus\n[00:05]Middle");
+        let lines =
+            parse("[ar:Someone]\n[00:01.50]Hello\n[00:10.00][00:20.25]Chorus\n[00:05]Middle");
         let times: Vec<_> = lines.iter().map(|l| l.time.unwrap()).collect();
         assert_eq!(times, [1.5, 5.0, 10.0, 20.25]);
         assert_eq!(lines[1].text, "Middle");
@@ -265,7 +285,9 @@ mod tests {
 
     #[test]
     fn strips_enhanced_word_timings() {
-        let lines = parse("[00:18.89]<00:18.89>We're <00:19.25>no <00:19.53>strangers <00:20.07>to <00:20.33>love");
+        let lines = parse(
+            "[00:18.89]<00:18.89>We're <00:19.25>no <00:19.53>strangers <00:20.07>to <00:20.33>love",
+        );
         // Singing starts at 18.9 s, so a music marker covers the intro.
         assert_eq!((lines[0].time, lines[0].text.as_str()), (Some(0.0), ""));
         assert_eq!(lines[1].text, "We're no strangers to love");
@@ -276,9 +298,21 @@ mod tests {
     #[test]
     fn music_breaks_become_markers_and_spacers_are_dropped() {
         let lines = parse("[00:08]First\n[00:10]\n[00:11]Second\n[00:20]\n[00:30]Third");
-        let texts: Vec<_> = lines.iter().map(|l| (l.time.unwrap(), l.text.as_str())).collect();
+        let texts: Vec<_> = lines
+            .iter()
+            .map(|l| (l.time.unwrap(), l.text.as_str()))
+            .collect();
         // Long intro gets a marker at 0, the 1 s spacer goes, the 10 s break stays.
-        assert_eq!(texts, [(0.0, ""), (8.0, "First"), (11.0, "Second"), (20.0, ""), (30.0, "Third")]);
+        assert_eq!(
+            texts,
+            [
+                (0.0, ""),
+                (8.0, "First"),
+                (11.0, "Second"),
+                (20.0, ""),
+                (30.0, "Third")
+            ]
+        );
         assert_eq!(current(&lines, 2.0), 0);
         assert_eq!(current(&lines, 25.0), 3);
         // A short intro gets no marker.

@@ -270,6 +270,27 @@ impl State {
         );
     }
 
+    fn publish_plex_libraries(&self, ui: &Sonic) {
+        let Some(plex) = &self.plex else {
+            ui.set_plex_libraries(ModelRc::default());
+            return;
+        };
+        let chosen = plex.chosen_sections(&self.data.preferences.plex_libraries);
+        ui.set_plex_libraries(ModelRc::new(VecModel::from(
+            plex.sections
+                .iter()
+                .map(|(key, title)| PlexLibrary {
+                    title: if title.is_empty() {
+                        "Music".into()
+                    } else {
+                        title.as_str().into()
+                    },
+                    selected: chosen.contains(key),
+                })
+                .collect::<Vec<_>>(),
+        )));
+    }
+
     fn apply_plex_connection(&mut self, ui: &Sonic, plex: Plex) {
         ui.set_connection_type(if plex.is_local {
             "Local network".into()
@@ -467,14 +488,20 @@ impl State {
 
     /// A 2x2 cover built from the playlist's albums once their art has loaded.
     fn playlist_mosaic(&self, playlist: &Playlist) -> Option<Image> {
-        let keys: Vec<String> = Self::mosaic_sources(playlist).into_iter().map(track_art_key).collect();
+        let keys: Vec<String> = Self::mosaic_sources(playlist)
+            .into_iter()
+            .map(track_art_key)
+            .collect();
         if keys.is_empty() {
             return None;
         }
         if let Some(image) = self.mosaics.borrow().get(&keys) {
             return Some(image.clone());
         }
-        let covers: Vec<&Image> = keys.iter().filter_map(|key| self.artwork.get(key)).collect();
+        let covers: Vec<&Image> = keys
+            .iter()
+            .filter_map(|key| self.artwork.get(key))
+            .collect();
         if covers.len() < keys.len() {
             return None;
         }
@@ -541,6 +568,7 @@ impl State {
             eq_preset: ui.get_eq_preset_index(),
             normalizer: ui.get_normalizer_enabled(),
             online_lyrics: ui.get_online_lyrics(),
+            plex_libraries: self.data.preferences.plex_libraries.clone(),
             font: ui.get_font_index(),
             discord_id: ui.get_discord_id().trim().to_owned(),
             discord_image: ui.get_discord_image().trim().to_owned(),
@@ -617,7 +645,10 @@ impl State {
         }
         let (tx, online) = (tx.clone(), ui.get_online_lyrics());
         thread::spawn(move || {
-            let _ = tx.send(Event::Lyrics(track.rating_key.clone(), lyrics::find(&track, online)));
+            let _ = tx.send(Event::Lyrics(
+                track.rating_key.clone(),
+                lyrics::find(&track, online),
+            ));
         });
     }
 
@@ -713,7 +744,10 @@ impl State {
                 None
             };
             // Not started since reopening: keep the saved position.
-            let started = self.player.as_ref().is_some_and(|player| !player.sink.empty());
+            let started = self
+                .player
+                .as_ref()
+                .is_some_and(|player| !player.sink.empty());
             let position = match &self.resume {
                 Some((_, position)) if !started => *position,
                 _ if exact => ui.get_position(),
@@ -822,27 +856,35 @@ impl State {
             return;
         }
         // Blend from whatever is on screen (even mid-fade) to the new colors.
-        let (weak, displayed, timer) = (ui.as_weak(), fade.displayed.clone(), Rc::downgrade(&fade.timer));
+        let (weak, displayed, timer) = (
+            ui.as_weak(),
+            fade.displayed.clone(),
+            Rc::downgrade(&fade.timer),
+        );
         let start = Instant::now();
-        fade.timer.start(TimerMode::Repeated, Duration::from_millis(16), move || {
-            let t = (start.elapsed().as_secs_f32() / 0.45).min(1.0);
-            let eased = 1.0 - (1.0 - t).powi(3);
-            let mix: PaletteColors = std::array::from_fn(|row| {
-                std::array::from_fn(|channel| {
-                    let (a, b) = (f32::from(from[row][channel]), f32::from(target[row][channel]));
-                    (a + (b - a) * eased).round() as u8
-                })
+        fade.timer
+            .start(TimerMode::Repeated, Duration::from_millis(16), move || {
+                let t = (start.elapsed().as_secs_f32() / 0.45).min(1.0);
+                let eased = 1.0 - (1.0 - t).powi(3);
+                let mix: PaletteColors = std::array::from_fn(|row| {
+                    std::array::from_fn(|channel| {
+                        let (a, b) = (
+                            f32::from(from[row][channel]),
+                            f32::from(target[row][channel]),
+                        );
+                        (a + (b - a) * eased).round() as u8
+                    })
+                });
+                if let Some(ui) = weak.upgrade() {
+                    apply_palette(&ui, mix);
+                }
+                displayed.set(Some(mix));
+                if t >= 1.0
+                    && let Some(timer) = timer.upgrade()
+                {
+                    timer.stop();
+                }
             });
-            if let Some(ui) = weak.upgrade() {
-                apply_palette(&ui, mix);
-            }
-            displayed.set(Some(mix));
-            if t >= 1.0
-                && let Some(timer) = timer.upgrade()
-            {
-                timer.stop();
-            }
-        });
     }
 
     fn use_tracks(
@@ -918,7 +960,13 @@ impl State {
                 .cloned()
                 .collect()
         } else if ui.get_page() != 3 {
-            self.queue.get(self.current..).unwrap_or_default().iter().take(50).cloned().collect()
+            self.queue
+                .get(self.current..)
+                .unwrap_or_default()
+                .iter()
+                .take(50)
+                .cloned()
+                .collect()
         } else if let Some(playlist) = self.data.playlists.get(ui.get_playlist_current() as usize) {
             if !reachable(playlist) {
                 return;
@@ -1501,6 +1549,7 @@ impl State {
                 match result {
                     Ok((plex, albums)) => {
                         self.apply_plex_connection(ui, plex);
+                        self.publish_plex_libraries(ui);
                         self.plex_albums = albums;
                         self.rebuild_library(ui);
                         self.restore_playback(ui);
@@ -1672,7 +1721,10 @@ impl State {
 
     fn audio_started(&mut self, ui: &Sonic, tx: &Sender<Event>, duration: Option<Duration>) {
         if let Some((key, position)) = self.resume.take()
-            && self.queue.get(self.current).is_some_and(|track| track.rating_key == key)
+            && self
+                .queue
+                .get(self.current)
+                .is_some_and(|track| track.rating_key == key)
         {
             self.seek(tx, Duration::from_secs_f32(position));
         }
@@ -1928,14 +1980,15 @@ fn layout_queue(tracks: &[QueueTrack], current: usize, layout: &QueueLayout) -> 
         runs.push((start, index));
     }
     let flat = layout.flatten_repeats && repeated;
-    let line = |index: i32, (height, gap): (i32, i32), grouped, track: &QueueTrack, number| QueueLine {
-        index,
-        height: height + gap,
-        gap,
-        grouped,
-        track: track.clone(),
-        number,
-    };
+    let line =
+        |index: i32, (height, gap): (i32, i32), grouped, track: &QueueTrack, number| QueueLine {
+            index,
+            height: height + gap,
+            gap,
+            grouped,
+            track: track.clone(),
+            number,
+        };
     let mut lines = Vec::with_capacity(tracks.len().saturating_sub(current) + runs.len());
     for (start, end) in runs {
         let grouped = !flat && end - start > 1;
@@ -2036,8 +2089,18 @@ struct ThemeFade {
 }
 
 fn apply_palette(ui: &Sonic, colors: PaletteColors) {
-    let [bg, surface, border, hover, selected, text, muted, accent, accent_text, accent_ink] =
-        colors.map(color);
+    let [
+        bg,
+        surface,
+        border,
+        hover,
+        selected,
+        text,
+        muted,
+        accent,
+        accent_text,
+        accent_ink,
+    ] = colors.map(color);
     let palette = ui.global::<Palette>();
     palette.set_background(bg);
     palette.set_panel(surface);
@@ -2059,7 +2122,11 @@ fn mosaic(covers: &[&Image]) -> Option<Image> {
         .iter()
         .filter_map(|cover| {
             let pixels = cover.to_rgba8()?;
-            let source = image::RgbaImage::from_raw(pixels.width(), pixels.height(), pixels.as_bytes().to_vec())?;
+            let source = image::RgbaImage::from_raw(
+                pixels.width(),
+                pixels.height(),
+                pixels.as_bytes().to_vec(),
+            )?;
             // Center-crop to a square, then scale to one tile.
             let side = source.width().min(source.height());
             let square = image::imageops::crop_imm(
@@ -2070,7 +2137,12 @@ fn mosaic(covers: &[&Image]) -> Option<Image> {
                 side,
             )
             .to_image();
-            Some(image::imageops::resize(&square, TILE, TILE, image::imageops::FilterType::Triangle))
+            Some(image::imageops::resize(
+                &square,
+                TILE,
+                TILE,
+                image::imageops::FilterType::Triangle,
+            ))
         })
         .collect();
     if tiles.len() == 1 {
@@ -2087,7 +2159,11 @@ fn mosaic(covers: &[&Image]) -> Option<Image> {
         let (x, y) = ((slot as u32 % 2) * TILE, (slot as u32 / 2) * TILE);
         image::imageops::replace(&mut canvas, &tiles[tile], i64::from(x), i64::from(y));
     }
-    let buffer = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(canvas.as_raw(), canvas.width(), canvas.height());
+    let buffer = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(
+        canvas.as_raw(),
+        canvas.width(),
+        canvas.height(),
+    );
     Some(Image::from_rgba8(buffer))
 }
 
@@ -2297,7 +2373,11 @@ fn sampled_theme(image: &Art) -> Option<[u8; 3]> {
             let min = color.iter().copied().min().unwrap_or(0);
             let chroma = f64::from(max - min) / 255.0;
             let usable = max > 40 && min < 225;
-            let score = if usable { f64::from(bucket[0]).sqrt() * chroma.powi(2) } else { 0.0 };
+            let score = if usable {
+                f64::from(bucket[0]).sqrt() * chroma.powi(2)
+            } else {
+                0.0
+            };
             (score, chroma, color)
         })
         .max_by(|a, b| a.0.total_cmp(&b.0));
@@ -2308,8 +2388,16 @@ fn sampled_theme(image: &Art) -> Option<[u8; 3]> {
     };
     // Album themes stay dark and subtle: a deep, softened version of the color,
     // so every album lands in a similar, calm range.
-    let saturation = if vivid { (saturation * 0.5).clamp(0.22, 0.42) } else { saturation.min(0.3) };
-    Some(from_hsl(hue, saturation.min(0.4), lightness.clamp(0.09, 0.15)))
+    let saturation = if vivid {
+        (saturation * 0.5).clamp(0.22, 0.42)
+    } else {
+        saturation.min(0.3)
+    };
+    Some(from_hsl(
+        hue,
+        saturation.min(0.4),
+        lightness.clamp(0.09, 0.15),
+    ))
 }
 
 fn window_on_screen(ui: &Sonic) -> bool {
@@ -2342,6 +2430,7 @@ fn main() -> Result<()> {
     ui.set_font_index(preferences.font.clamp(0, 5));
     ui.set_normalizer_enabled(preferences.normalizer);
     ui.set_online_lyrics(preferences.online_lyrics);
+    ui.set_app_version(env!("CARGO_PKG_VERSION").into());
     ui.set_eq_preset_index(preferences.eq_preset.clamp(0, 6));
     ui.set_discord_id(preferences.discord_id.as_str().into());
     ui.set_discord_image(preferences.discord_image.as_str().into());
@@ -2472,6 +2561,7 @@ fn main() -> Result<()> {
     }
 
     ui.on_sign_in({
+        let state = state.clone();
         let weak = ui.as_weak();
         let tx = tx.clone();
         move || {
@@ -2479,8 +2569,10 @@ fn main() -> Result<()> {
             ui.set_connecting(true);
             ui.set_status("Approve Sonic in the Plex sign-in window…".into());
             let tx = tx.clone();
+            let wanted = state.borrow().data.preferences.plex_libraries.clone();
             thread::spawn(move || {
-                let result = Plex::sign_in().and_then(|plex| Ok((plex.clone(), plex.albums()?)));
+                let result =
+                    Plex::sign_in().and_then(|plex| Ok((plex.clone(), plex.albums(&wanted)?)));
                 let _ = tx.send(Event::Library(result));
             });
         }
@@ -2558,12 +2650,17 @@ fn main() -> Result<()> {
                 return;
             };
             let index = index as usize;
-            let Some(track) = tracks.get(index).cloned() else { return };
+            let Some(track) = tracks.get(index).cloned() else {
+                return;
+            };
             if action == 2 {
                 // Shuffle the album and start from the chosen song, like the album track menu.
                 let mut order: Vec<_> = (0..tracks.len()).collect();
                 fastrand::shuffle(&mut order);
-                let selected = order.iter().position(|&row| row == index).unwrap_or_default();
+                let selected = order
+                    .iter()
+                    .position(|&row| row == index)
+                    .unwrap_or_default();
                 let shuffled = order.into_iter().map(|row| tracks[row].clone()).collect();
                 state.splice_play(&ui, &tx, shuffled, selected);
             } else {
@@ -2597,7 +2694,11 @@ fn main() -> Result<()> {
                 }
                 y = next;
             }
-            for index in visible.into_iter().map(|row| state.visible[row]).collect::<Vec<_>>() {
+            for index in visible
+                .into_iter()
+                .map(|row| state.visible[row])
+                .collect::<Vec<_>>()
+            {
                 if state.pending_art.len() >= 4 {
                     break;
                 }
@@ -2703,8 +2804,9 @@ fn main() -> Result<()> {
             {
                 ui.set_connecting(true);
                 let tx = tx.clone();
+                let wanted = state.data.preferences.plex_libraries.clone();
                 thread::spawn(move || {
-                    let result = plex.albums().map(|albums| (plex, albums));
+                    let result = plex.albums(&wanted).map(|albums| (plex, albums));
                     let _ = tx.send(Event::Library(result));
                 });
             }
@@ -3107,7 +3209,9 @@ fn main() -> Result<()> {
         move |index| {
             let Some(ui) = weak.upgrade() else { return };
             let mut state = state.borrow_mut();
-            let Ok(index) = usize::try_from(index) else { return };
+            let Ok(index) = usize::try_from(index) else {
+                return;
+            };
             if index >= state.data.playlists.len() {
                 return;
             }
@@ -3366,11 +3470,48 @@ fn main() -> Result<()> {
             });
         }
     });
+    ui.on_toggle_plex_library({
+        let (state, weak) = (state.clone(), ui.as_weak());
+        move |index| {
+            let Some(ui) = weak.upgrade() else { return };
+            {
+                let mut state = state.borrow_mut();
+                let Some(plex) = state.plex.clone() else {
+                    return;
+                };
+                let Some((key, _)) = plex.sections.get(index as usize).cloned() else {
+                    return;
+                };
+                let mut chosen = plex.chosen_sections(&state.data.preferences.plex_libraries);
+                if let Some(at) = chosen.iter().position(|k| *k == key) {
+                    if chosen.len() == 1 {
+                        ui.set_status("Keep at least one music library selected.".into());
+                        return;
+                    }
+                    chosen.remove(at);
+                } else {
+                    chosen.push(key);
+                }
+                // Everything selected is saved as "all", so libraries added later show up too.
+                state.data.preferences.plex_libraries = if chosen.len() == plex.sections.len() {
+                    Vec::new()
+                } else {
+                    chosen
+                };
+                state.publish_plex_libraries(&ui);
+                state.save(&ui, "Music libraries saved");
+            }
+            // Reload albums from the new selection.
+            ui.invoke_refresh_library();
+        }
+    });
     ui.on_lyrics_layout({
         let (state, weak) = (state.clone(), ui.as_weak());
         move |chars| {
             let Some(ui) = weak.upgrade() else { return };
-            let Ok(mut state) = state.try_borrow_mut() else { return };
+            let Ok(mut state) = state.try_borrow_mut() else {
+                return;
+            };
             let chars = chars.max(8) as usize;
             if chars != state.lyrics_chars {
                 state.lyrics_chars = chars;
@@ -3562,9 +3703,10 @@ fn main() -> Result<()> {
     ui.set_connecting(true);
     {
         let tx = tx.clone();
+        let wanted = preferences.plex_libraries.clone();
         thread::spawn(move || {
             let event = match Plex::restore() {
-                Ok(Some(plex)) => Event::Library(plex.albums().map(|albums| (plex, albums))),
+                Ok(Some(plex)) => Event::Library(plex.albums(&wanted).map(|albums| (plex, albums))),
                 Ok(None) => Event::NoSavedPlex,
                 Err(error) => Event::Library(Err(error)),
             };
@@ -3587,7 +3729,9 @@ fn main() -> Result<()> {
             if !ui.get_playing() || !window_on_screen(&ui) {
                 return;
             }
-            let Ok(state) = state.try_borrow() else { return };
+            let Ok(state) = state.try_borrow() else {
+                return;
+            };
             let raw = state.equalizer.levels();
             for band in 0..4 {
                 peaks[band] = (peaks[band] * 0.996).max(raw[band]).max(FLOORS[band]);
@@ -3844,8 +3988,10 @@ mod drag_tests {
         let counted = toggles.clone();
         ui.on_toggle_play(move || counted.set(counted.get() + 1));
         let space = |ui: &Sonic| {
-            ui.window().dispatch_event(WindowEvent::KeyPressed { text: " ".into() });
-            ui.window().dispatch_event(WindowEvent::KeyReleased { text: " ".into() });
+            ui.window()
+                .dispatch_event(WindowEvent::KeyPressed { text: " ".into() });
+            ui.window()
+                .dispatch_event(WindowEvent::KeyReleased { text: " ".into() });
         };
         space(&ui);
         assert_eq!(toggles.get(), 1);
@@ -3874,16 +4020,26 @@ mod drag_tests {
         });
         assert_eq!(removes(&ui), 1);
         // Right-clicking a Queue row opens Sonic's own menu with all three actions.
-        ui.set_playlists(ModelRc::new(VecModel::from(vec![slint::SharedString::from("Fixture")])));
+        ui.set_playlists(ModelRc::new(VecModel::from(vec![
+            slint::SharedString::from("Fixture"),
+        ])));
         let saved = Rc::new(std::cell::Cell::new(None));
         let result = saved.clone();
         ui.on_queue_track_action(move |row, action, playlist| {
             result.set(Some((row, action, playlist)))
         });
         let row = LogicalPosition::new(from.x + 200.0, from.y);
-        click(ui.window(), LogicalPosition::new(row.x, center(&handles[1]).y), PointerEventButton::Left);
+        click(
+            ui.window(),
+            LogicalPosition::new(row.x, center(&handles[1]).y),
+            PointerEventButton::Left,
+        );
         space(&ui);
-        assert_eq!(toggles.get(), 2, "Space still toggles after a row has focus");
+        assert_eq!(
+            toggles.get(),
+            2,
+            "Space still toggles after a row has focus"
+        );
         click(ui.window(), row, PointerEventButton::Right);
         let item = |label: &str| {
             ElementQuery::from_root(&ui)
@@ -3895,7 +4051,11 @@ mod drag_tests {
             item(label);
         }
         // A real pointer click on the item runs it and closes the menu.
-        click(ui.window(), center(&item("Add to queue")), PointerEventButton::Left);
+        click(
+            ui.window(),
+            center(&item("Add to queue")),
+            PointerEventButton::Left,
+        );
         assert_eq!(saved.get(), Some((0, 1, -1)));
         assert!(
             ElementQuery::from_root(&ui)
@@ -3905,7 +4065,11 @@ mod drag_tests {
         );
         // "Add to playlist" opens the picker, and choosing a playlist saves the row there.
         click(ui.window(), row, PointerEventButton::Right);
-        click(ui.window(), center(&item("Add to playlist")), PointerEventButton::Left);
+        click(
+            ui.window(),
+            center(&item("Add to playlist")),
+            PointerEventButton::Left,
+        );
         item("Fixture").invoke_accessible_default_action();
         assert_eq!(saved.get(), Some((0, 3, 0)));
 
@@ -4024,7 +4188,8 @@ mod drag_tests {
         assert_eq!(query.borrow().as_str(), "a");
         // While typing in search, Space types a space instead of pausing.
         let before = toggles.get();
-        ui.window().dispatch_event(WindowEvent::KeyPressed { text: " ".into() });
+        ui.window()
+            .dispatch_event(WindowEvent::KeyPressed { text: " ".into() });
         assert_eq!(toggles.get(), before);
         assert_eq!(query.borrow().as_str(), "a ");
 

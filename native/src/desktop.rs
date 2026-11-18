@@ -108,7 +108,8 @@ impl Tray {
 /// Whether Sonic's window is on screen (not hidden in the tray or minimized).
 pub fn window_shown(ui: &crate::Sonic) -> bool {
     let handle = ui.window().window_handle();
-    let Some(RawWindowHandle::Win32(handle)) = handle.window_handle().ok().map(|h| h.as_raw()) else {
+    let Some(RawWindowHandle::Win32(handle)) = handle.window_handle().ok().map(|h| h.as_raw())
+    else {
         return true;
     };
     let hwnd = handle.hwnd.get() as HWND;
@@ -120,7 +121,8 @@ pub fn window_shown(ui: &crate::Sonic) -> bool {
 /// an update. Returns false until the native window exists, so the caller can retry.
 pub fn set_window_icons(ui: &crate::Sonic) -> bool {
     let handle = ui.window().window_handle();
-    let Some(RawWindowHandle::Win32(handle)) = handle.window_handle().ok().map(|h| h.as_raw()) else {
+    let Some(RawWindowHandle::Win32(handle)) = handle.window_handle().ok().map(|h| h.as_raw())
+    else {
         return false;
     };
     let hwnd = handle.hwnd.get() as HWND;
@@ -313,7 +315,9 @@ fn ico_image(file: &[u8], target: i32) -> Option<&[u8]> {
 
 /// Opens the Windows color dialog over Sonic, like the original's color input.
 pub fn pick_color(ui: &crate::Sonic, initial: [u8; 3]) -> Option<[u8; 3]> {
-    use windows_sys::Win32::UI::Controls::Dialogs::{CC_FULLOPEN, CC_RGBINIT, CHOOSECOLORW, ChooseColorW};
+    use windows_sys::Win32::UI::Controls::Dialogs::{
+        CC_FULLOPEN, CC_RGBINIT, CHOOSECOLORW, ChooseColorW,
+    };
     let owner = ui
         .window()
         .window_handle()
