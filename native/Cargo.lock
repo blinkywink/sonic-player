@@ -5366,7 +5366,7 @@ dependencies = [
 
 [[package]]
 name = "sonicplayer"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "discord-rich-presence",
