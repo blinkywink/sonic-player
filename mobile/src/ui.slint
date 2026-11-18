@@ -15,6 +15,7 @@ global Theme {
     out property <color> muted: #9ca8b8;
     out property <color> accent: #2f5bc4;
     out property <color> hairline: #e8eef41a;
+    out property <color> selected: #e8eef41c;
     out property <brush> glass: @linear-gradient(180deg, #1e2b49e6 0%, #18233cd9 100%);
 }
 
@@ -132,7 +133,9 @@ export component MobileApp inherits Window {
 
     property <length> top-inset: max(root.safe-area-insets.top, 12px);
     property <length> bottom-inset: root.safe-area-insets.bottom;
-    property <length> tab-height: 56px + root.bottom-inset;
+    // Floating tab bar: 58 px capsule above the home indicator.
+    property <length> tab-gap: max(root.bottom-inset, 14px);
+    property <length> tab-height: 58px + root.tab-gap + 8px;
     property <length> mini-height: root.has-track ? 72px : 0px;
     property <length> content-bottom: root.tab-height + root.mini-height;
 
@@ -154,6 +157,8 @@ export component MobileApp inherits Window {
                 height: grid.row-height;
                 for column in row.count: Rectangle {
                     property <AlbumItem> album: root.albums[row.first + column];
+                    opacity: tile-hit.pressed ? 0.65 : 1;
+                    animate opacity { duration: 120ms; }
                     x: grid.side + column * (grid.tile + grid.gap);
                     width: grid.tile; height: grid.row-height;
                     Cover { y: 0; width: grid.tile; height: grid.tile; art: album.art; radius: 14px; }
@@ -161,7 +166,7 @@ export component MobileApp inherits Window {
                     Label { y: grid.tile + 27px; height: 17px; width: parent.width; text: album.artist; font-size: 12px; color: Theme.muted; }
                     accessible-role: button; accessible-label: album.title;
                     accessible-action-default => { root.open-album(album.key); }
-                    TouchArea { clicked => { root.open-album(album.key); } }
+                    tile-hit := TouchArea { clicked => { root.open-album(album.key); } }
                 }
             }
         }
@@ -374,16 +379,17 @@ export component MobileApp inherits Window {
         }
     }
 
-    // ---- Mini player ----
+    // ---- Mini player (tap to open Now Playing) ----
     if root.has-track: Rectangle {
-        x: 10px; width: parent.width - 20px; height: 64px;
-        y: parent.height - root.tab-height - self.height - 6px;
-        border-radius: 18px; background: Theme.glass; border-width: 1px; border-color: Theme.hairline;
+        x: 14px; width: parent.width - 28px; height: 64px;
+        y: parent.height - root.tab-height - self.height;
+        border-radius: 20px; background: Theme.glass; border-width: 1px; border-color: Theme.hairline;
         drop-shadow-color: #00000066; drop-shadow-blur: 24px; drop-shadow-offset-y: 6px;
         clip: true;
+        TouchArea { clicked => { root.screen = 4; } }
         HorizontalLayout {
             padding-left: 8px; padding-right: 6px; padding-top: 8px; padding-bottom: 8px; spacing: 10px;
-            Cover { width: 48px; art: root.now-art; radius: 8px; }
+            Cover { width: 48px; art: root.now-art; radius: 10px; }
             VerticalLayout {
                 horizontal-stretch: 1; alignment: center; spacing: 1px;
                 Label { text: root.now-title; font-size: 15px; font-weight: 600; height: 20px; }
@@ -395,18 +401,19 @@ export component MobileApp inherits Window {
         }
         // Progress line along the bottom edge.
         Rectangle {
-            x: 14px; y: parent.height - 3px; width: parent.width - 28px; height: 2px; border-radius: 1px; background: Theme.hairline;
+            x: 16px; y: parent.height - 3px; width: parent.width - 32px; height: 2px; border-radius: 1px; background: Theme.hairline;
             Rectangle { x: 0; width: parent.width * clamp(root.position / max(1, root.duration), 0, 1); background: Theme.text; border-radius: 1px; }
         }
     }
 
-    // ---- Tab bar ----
+    // ---- Tab bar: a floating glass capsule, icons only ----
     Rectangle {
-        y: parent.height - root.tab-height; height: root.tab-height;
-        background: Theme.glass;
-        Rectangle { y: 0; height: 1px; background: Theme.hairline; }
+        x: 14px; width: parent.width - 28px; height: 58px;
+        y: parent.height - root.tab-gap - self.height;
+        border-radius: 29px; background: Theme.glass; border-width: 1px; border-color: Theme.hairline;
+        drop-shadow-color: #00000066; drop-shadow-blur: 24px; drop-shadow-offset-y: 6px;
         HorizontalLayout {
-            height: 56px; y: 0;
+            padding: 6px; spacing: 4px;
             for entry[index] in [
                 { label: "Library", icon: @image-url("icons/home.svg"), screen: 0 },
                 { label: "Now Playing", icon: @image-url("icons/music.svg"), screen: 4 },
@@ -414,12 +421,15 @@ export component MobileApp inherits Window {
                 { label: "Settings", icon: @image-url("icons/settings.svg"), screen: 3 },
             ]: tab-cell := Rectangle {
                 property <bool> active: entry.screen == 0 ? root.screen <= 1 : root.screen == entry.screen;
+                border-radius: self.height / 2;
+                background: self.active ? Theme.selected : transparent;
+                animate background { duration: 150ms; }
                 accessible-role: tab; accessible-label: entry.label;
                 accessible-action-default => { root.screen = entry.screen; }
-                VerticalLayout {
-                    alignment: center; spacing: 3px;
-                    Rectangle { height: 24px; Icon { source: entry.icon; colorize: tab-cell.active ? Theme.text : Theme.muted; } }
-                    Label { text: entry.label; font-size: 11px; font-weight: 600; horizontal-alignment: center; height: 14px; color: tab-cell.active ? Theme.text : Theme.muted; }
+                Icon {
+                    x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+                    width: 24px; height: 24px; source: entry.icon;
+                    colorize: tab-cell.active ? Theme.text : Theme.muted;
                 }
                 TouchArea { clicked => { root.screen = entry.screen; } }
             }

@@ -7,13 +7,29 @@
 mod credentials;
 #[cfg(target_os = "ios")]
 mod ios;
+/// Desktop test builds have no system media controls.
+#[cfg(not(target_os = "ios"))]
+mod ios {
+    use crate::{NowPlaying, Remote};
+    pub fn start_remote_commands() {}
+    pub fn take_commands() -> Vec<Remote> {
+        Vec::new()
+    }
+    pub fn artwork_key() -> Option<String> {
+        None
+    }
+    pub fn set_artwork(_key: &str, _bytes: &[u8]) {}
+    pub fn now_playing(_info: Option<&NowPlaying>) {}
+}
 #[cfg(not(target_os = "ios"))]
 #[path = "../../native/src/local.rs"]
 mod local;
 #[path = "../../native/src/lyrics.rs"]
 mod lyrics;
+#[allow(dead_code)] // Shared with the desktop app, which uses more of it.
 #[path = "../../native/src/plex.rs"]
 mod plex;
+#[allow(dead_code)] // Shared with the desktop app, which uses more of it.
 #[path = "../../native/src/stream.rs"]
 mod stream;
 
@@ -61,7 +77,34 @@ enum Event {
     Art(String, Option<Art>),
     Audio(u64, Result<Decoder<BufReader<Box<dyn AudioInput>>>>),
     Lyrics(String, Option<Vec<lyrics::Line>>),
+    /// Full-size cover (encoded) for the lock screen, by album key.
+    NowArt(String, Vec<u8>),
 }
+
+/// A command from the lock screen, Control Center, headphones or car.
+#[derive(Clone, Copy)]
+pub enum Remote {
+    Play,
+    Pause,
+    Toggle,
+    Next,
+    Previous,
+    Seek(f64),
+}
+
+/// What the system media controls show.
+pub struct NowPlaying {
+    pub title: String,
+    pub artist: String,
+    pub album: String,
+    pub duration: f64,
+    pub elapsed: f64,
+    pub playing: bool,
+    pub art_key: String,
+}
+
+/// Lock screen artwork size (the system scales it down as needed).
+const NOW_ART_SIZE: u32 = 1024;
 
 #[derive(Default, Deserialize, Serialize)]
 #[serde(default)]
@@ -115,6 +158,8 @@ struct App {
     lyrics_key: String,
     lyrics_chars: usize,
     lyric_index: i32,
+    /// Album whose full-size lock screen cover is being fetched.
+    now_art_pending: String,
 }
 
 impl App {
@@ -297,6 +342,46 @@ impl App {
             ui.set_duration((track.duration as f32 / 1000.0).max(1.0));
         }
         ui.set_playing(self.playing);
+        self.publish_system();
+    }
+
+    /// Updates the lock screen / Control Center info (position, play state, artwork).
+    fn publish_system(&self) {
+        let Some(track) = self.queue.get(self.current) else {
+            ios::now_playing(None);
+            return;
+        };
+        ios::now_playing(Some(&NowPlaying {
+            title: track.title.clone(),
+            artist: track.grandparent_title.clone(),
+            album: track.parent_title.clone(),
+            duration: track.duration as f64 / 1000.0,
+            elapsed: self.sink.as_ref().map(|s| s.get_pos().as_secs_f64()).unwrap_or(0.0),
+            playing: self.playing,
+            art_key: track.parent_rating_key.clone(),
+        }));
+    }
+
+    /// Fetches a full-size cover of the current song's album for the lock screen.
+    fn fetch_now_art(&mut self) {
+        let Some(track) = self.queue.get(self.current) else { return };
+        let key = track.parent_rating_key.clone();
+        if ios::artwork_key().as_deref() == Some(key.as_str()) || self.now_art_pending == key {
+            return;
+        }
+        let album = self.albums.iter().find(|a| a.rating_key == key);
+        let thumb = [album.map(|a| a.thumb.clone()), Some(track.parent_thumb.clone()), Some(track.thumb.clone())]
+            .into_iter()
+            .flatten()
+            .find(|thumb| !thumb.is_empty());
+        let (Some(thumb), Some(plex)) = (thumb, self.plex.clone()) else { return };
+        self.now_art_pending.clone_from(&key);
+        let tx = self.tx.clone();
+        thread::spawn(move || {
+            if let Some(bytes) = plex_cover_bytes(&plex, &thumb, NOW_ART_SIZE) {
+                let _ = tx.send(Event::NowArt(key, bytes));
+            }
+        });
     }
 
     fn play_list(&mut self, ui: &MobileApp, tracks: Vec<Entry>, start: usize) {
@@ -324,6 +409,7 @@ impl App {
         self.publish_queue(ui);
         self.publish_tracks(ui);
         self.fetch_lyrics(ui);
+        self.fetch_now_art();
         if let Some(album) = self.albums.iter().find(|a| a.rating_key == track.parent_rating_key).cloned() {
             self.fetch_art(&album);
         }
@@ -400,6 +486,29 @@ impl App {
             None => {}
         }
         ui.set_playing(self.playing);
+        self.publish_system();
+    }
+
+    fn seek(&mut self, seconds: f32) {
+        if let Some(sink) = &self.sink {
+            let _ = sink.try_seek(Duration::from_secs_f32(seconds.max(0.0)));
+        }
+        self.publish_system();
+    }
+
+    fn remote(&mut self, ui: &MobileApp, command: Remote) {
+        match command {
+            Remote::Play if !self.playing => self.toggle(ui),
+            Remote::Pause if self.playing => self.toggle(ui),
+            Remote::Play | Remote::Pause => {}
+            Remote::Toggle => self.toggle(ui),
+            Remote::Next => self.step(ui, true),
+            Remote::Previous => self.step(ui, false),
+            Remote::Seek(seconds) => {
+                self.seek(seconds as f32);
+                ui.set_position(seconds as f32);
+            }
+        }
     }
 
     fn step(&mut self, ui: &MobileApp, forward: bool) {
@@ -506,6 +615,8 @@ impl App {
                             sink.pause();
                         }
                         self.sink = Some(sink);
+                        // The song really starts now; restart the lock screen clock.
+                        self.publish_system();
                     }
                 }
                 Err(error) => {
@@ -515,6 +626,13 @@ impl App {
                 }
             },
             Event::Audio(..) => {}
+            Event::NowArt(key, bytes) => {
+                if self.now_art_pending == key {
+                    self.now_art_pending.clear();
+                }
+                ios::set_artwork(&key, &bytes);
+                self.publish_system();
+            }
             Event::Lyrics(key, lines) => {
                 self.lyrics_pending.remove(&key);
                 self.lyrics_cache.insert(key.clone(), lines);
@@ -563,7 +681,12 @@ fn decode(data: &[u8]) -> Option<Art> {
 }
 
 fn plex_cover(plex: &Plex, thumb: &str) -> Option<Art> {
-    let size = COVER_SIZE.to_string();
+    decode(&plex_cover_bytes(plex, thumb, COVER_SIZE)?)
+}
+
+/// An album cover from Plex, resized by the server, still encoded.
+fn plex_cover_bytes(plex: &Plex, thumb: &str, size: u32) -> Option<Vec<u8>> {
+    let size = size.to_string();
     let response = plex
         .request("/photo/:/transcode")
         .ok()?
@@ -574,8 +697,8 @@ fn plex_cover(plex: &Plex, thumb: &str) -> Option<Art> {
         .error_for_status()
         .ok()?;
     let mut data = Vec::new();
-    response.take(2 * 1024 * 1024).read_to_end(&mut data).ok()?;
-    decode(&data)
+    response.take(4 * 1024 * 1024).read_to_end(&mut data).ok()?;
+    Some(data)
 }
 
 fn open_audio(plex: Option<Plex>, track: &Entry) -> Result<Decoder<BufReader<Box<dyn AudioInput>>>> {
@@ -626,6 +749,7 @@ fn main() -> Result<()> {
         lyrics_key: String::new(),
         lyrics_chars: 22,
         lyric_index: -1,
+        now_art_pending: String::new(),
     }));
 
     macro_rules! on {
@@ -633,6 +757,7 @@ fn main() -> Result<()> {
             let (app, weak) = (app.clone(), ui.as_weak());
             ui.$setter(move |$($arg),*| {
                 let Some($ui) = weak.upgrade() else { return };
+                #[allow(unused_mut)]
                 let Ok(mut $app) = app.try_borrow_mut() else { return };
                 $body
             });
@@ -669,9 +794,7 @@ fn main() -> Result<()> {
     on!(on_toggle_play, |app, ui| { app.toggle(&ui); });
     on!(on_seek, |app, ui, seconds| {
         let _ = &ui;
-        if let Some(sink) = &app.sink {
-            let _ = sink.try_seek(Duration::from_secs_f32(seconds.max(0.0)));
-        }
+        app.seek(seconds);
     });
     on!(on_lyrics_layout, |app, ui, chars| {
         let chars = chars.max(8) as usize;
@@ -740,9 +863,18 @@ fn main() -> Result<()> {
     let timer = Timer::default();
     {
         let (app, weak) = (app.clone(), ui.as_weak());
+        let mut started = false;
         timer.start(TimerMode::Repeated, Duration::from_millis(200), move || {
             let Some(ui) = weak.upgrade() else { return };
             let Ok(mut app) = app.try_borrow_mut() else { return };
+            if !started {
+                // The app object exists once the event loop runs.
+                started = true;
+                ios::start_remote_commands();
+            }
+            for command in ios::take_commands() {
+                app.remote(&ui, command);
+            }
             for event in rx.try_iter().take(16) {
                 app.receive(&ui, event);
             }

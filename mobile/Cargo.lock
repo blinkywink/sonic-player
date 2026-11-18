@@ -5237,6 +5237,7 @@ name = "sonic-mobile"
 version = "0.2.0"
 dependencies = [
  "anyhow",
+ "block2 0.6.2",
  "fastrand",
  "image",
  "keyring",
