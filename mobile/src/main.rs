@@ -98,6 +98,8 @@ enum Event {
     Lyrics(String, Option<Vec<lyrics::Line>>),
     /// Full-size cover (encoded) for the lock screen, by album key.
     NowArt(String, Vec<u8>),
+    /// An album's tracks to add to the queue (fetched because they weren't saved).
+    Enqueue(Result<Vec<Entry>>),
     /// Album tracks loaded in bulk (replacing the saved ones after a refresh).
     TracksLoaded(HashMap<String, Vec<Entry>>, bool),
     FmRestored(Option<lastfm::Session>),
@@ -554,6 +556,23 @@ impl App {
         });
     }
 
+    /// Adds songs to the end of the queue (or plays them when nothing is queued).
+    fn enqueue(&mut self, ui: &MobileApp, tracks: Vec<Entry>) {
+        if tracks.is_empty() {
+            return;
+        }
+        let count = tracks.len();
+        if self.queue.is_empty() || self.current >= self.queue.len() {
+            self.play_list(ui, tracks, 0);
+        } else {
+            self.queue.extend(tracks);
+            self.shuffled = true; // a mixed queue: level songs by track
+            self.publish_queue(ui);
+            self.fetch_lyrics(ui);
+        }
+        ui.set_toast(if count == 1 { "Added to queue".into() } else { format!("Added {count} songs to queue").into() });
+    }
+
     fn play_list(&mut self, ui: &MobileApp, tracks: Vec<Entry>, start: usize) {
         if tracks.is_empty() {
             return;
@@ -923,6 +942,10 @@ impl App {
                 }
             },
             Event::Audio(..) => {}
+            Event::Enqueue(result) => match result {
+                Ok(tracks) => self.enqueue(ui, tracks),
+                Err(error) => ui.set_toast(format!("Couldn't add: {error}").into()),
+            },
             Event::TracksLoaded(tracks, replace) => {
                 if replace {
                     self.tracks.clear();
@@ -1343,6 +1366,24 @@ fn main() -> Result<()> {
             };
             let _ = tx.send(event);
         });
+    });
+    on!(on_add_album_to_queue, |app, ui, key| {
+        if let Some(tracks) = app.tracks.get(key.as_str()).cloned() {
+            app.enqueue(&ui, tracks);
+            return;
+        }
+        let Some(album) = app.albums.iter().find(|album| album.rating_key == key.as_str()).cloned() else { return };
+        let (tx, plex) = (app.tx.clone(), app.plex.clone());
+        thread::spawn(move || {
+            let result = plex.context("Plex is disconnected").and_then(|plex| plex.tracks(&album));
+            let _ = tx.send(Event::Enqueue(result));
+        });
+    });
+    on!(on_add_track_to_queue, |app, ui, index| {
+        let track = app.tracks.get(&app.open_album).and_then(|tracks| tracks.get(index.max(0) as usize)).cloned();
+        if let Some(track) = track {
+            app.enqueue(&ui, vec![track]);
+        }
     });
     on!(on_open_playing_album, |app, ui| {
         let Some(key) = app.queue.get(app.current).map(|track| track.parent_rating_key.clone()) else { return };

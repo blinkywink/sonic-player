@@ -293,6 +293,13 @@ export component MobileApp inherits Window {
     callback refresh-library;
     // Open the playing song's album.
     callback open-playing-album;
+    callback add-album-to-queue(string);
+    callback add-track-to-queue(int);
+    // A short confirmation shown above the mini player.
+    in-out property <string> toast;
+    // Album whose hold menu is open ("" = closed).
+    property <string> menu-key;
+    property <string> menu-title;
     callback set-columns(int);
     callback set-eq(int);
     callback toggle-normalizer;
@@ -369,8 +376,10 @@ export component MobileApp inherits Window {
             property <length> row-height: self.tile + (self.cols == 2 ? 54px : self.cols == 3 ? 48px : 42px);
             for row in root.album-rows: Rectangle {
                 height: grid.row-height;
-                for item[column] in row.items: Rectangle {
+                for item[column] in row.items: tile := Rectangle {
                     property <AlbumItem> album: root.albums[item];
+                    // Held long enough to open the menu (the tap then doesn't open the album).
+                    property <bool> held;
                     x: grid.side + column * (grid.tile + grid.gap);
                     width: grid.tile; height: grid.row-height;
                     opacity: tile-hit.pressed ? 0.6 : 1;
@@ -380,7 +389,17 @@ export component MobileApp inherits Window {
                     Label { y: grid.tile + 7px + grid.title-size + 4px; height: grid.title-size + 3px; width: parent.width; text: album.artist; font-size: grid.title-size - 2px; color: Theme.muted; }
                     accessible-role: button; accessible-label: album.title;
                     accessible-action-default => { root.open-album(album.key); }
-                    tile-hit := TouchArea { clicked => { search-input.clear-focus(); root.open-album(album.key); } }
+                    tile-hit := TouchArea {
+                        pointer-event(event) => { if event.kind == PointerEventKind.down { tile.held = false; } }
+                        clicked => {
+                            if !tile.held { search-input.clear-focus(); root.open-album(album.key); }
+                            tile.held = false;
+                        }
+                    }
+                    Timer {
+                        interval: 450ms; running: tile-hit.pressed && !tile.held;
+                        triggered => { tile.held = true; root.menu-key = album.key; root.menu-title = album.title; }
+                    }
                 }
             }
         }
@@ -442,19 +461,50 @@ export component MobileApp inherits Window {
                 }
             }
             if root.tracks-loading: Rectangle { height: 48px; Label { x: 20px; text: "Loading songs…"; color: Theme.muted; } }
-            for track[index] in root.tracks: Rectangle {
+            for track[index] in root.tracks: song := Rectangle {
                 height: 52px;
-                background: track-hit.pressed ? Theme.surface : transparent;
-                Rectangle { x: 56px; y: parent.height - 1px; width: parent.width - 56px; height: 1px; background: Theme.hairline; }
-                HorizontalLayout {
-                    padding-left: 20px; padding-right: 20px; spacing: 14px;
-                    Label { width: 22px; text: track.number; font-size: 14px; color: track.current ? Theme.accent-text : Theme.muted; horizontal-alignment: right; }
-                    Label { horizontal-stretch: 1; text: track.title; font-size: 16px; color: track.current ? Theme.accent-text : Theme.text; font-weight: track.current ? 600 : 400; }
-                    Label { text: track.time; font-size: 14px; color: Theme.muted; }
+                clip: true;
+                // How far the row is pulled right; past 64 px, letting go queues the song.
+                property <length> slide: 0px;
+                property <length> press: 0px;
+                property <bool> dragged;
+                if song.slide > 0px: Rectangle {
+                    width: song.slide; background: song.slide > 64px ? Theme.accent : Theme.raised;
+                    Icon { x: 18px; y: (parent.height - self.height) / 2; source: @image-url("icons/queue.svg"); colorize: white; }
+                }
+                Rectangle {
+                    x: song.slide; width: parent.width; height: parent.height;
+                    background: track-hit.pressed && !song.dragged ? Theme.surface : Theme.background;
+                    animate x { duration: track-hit.pressed ? 0ms : 180ms; easing: ease-out; }
+                    Rectangle { x: 56px; y: parent.height - 1px; width: parent.width - 56px; height: 1px; background: Theme.hairline; }
+                    HorizontalLayout {
+                        padding-left: 20px; padding-right: 20px; spacing: 14px;
+                        Label { width: 22px; text: track.number; font-size: 14px; color: track.current ? Theme.accent-text : Theme.muted; horizontal-alignment: right; }
+                        Label { horizontal-stretch: 1; text: track.title; font-size: 16px; color: track.current ? Theme.accent-text : Theme.text; font-weight: track.current ? 600 : 400; }
+                        Label { text: track.time; font-size: 14px; color: Theme.muted; }
+                    }
+                    track-hit := TouchArea {
+                        pointer-event(event) => {
+                            if event.kind == PointerEventKind.down {
+                                song.dragged = false;
+                                song.press = self.mouse-x + song.slide;
+                            } else if event.kind == PointerEventKind.up || event.kind == PointerEventKind.cancel {
+                                if song.slide > 64px { root.add-track-to-queue(index); }
+                                song.slide = 0px;
+                            }
+                        }
+                        moved => {
+                            if abs(self.mouse-x + song.slide - song.press) > 8px { song.dragged = true; }
+                            song.slide = clamp(self.mouse-x + song.slide - song.press, 0px, 96px);
+                        }
+                        clicked => {
+                            if !song.dragged { root.play-track(index); }
+                            song.dragged = false;
+                        }
+                    }
                 }
                 accessible-role: button; accessible-label: track.title;
                 accessible-action-default => { root.play-track(index); }
-                track-hit := TouchArea { clicked => { root.play-track(index); } }
             }
             Rectangle { height: 24px; }
           }
@@ -726,6 +776,37 @@ export component MobileApp inherits Window {
                     colorize: tab-cell.active ? Theme.text : Theme.muted;
                 }
                 TouchArea { clicked => { root.screen = entry.screen; } }
+            }
+        }
+    }
+
+    // ---- "Added to queue" confirmation ----
+    if root.toast != "": Rectangle {
+        x: (parent.width - self.width) / 2; width: min(parent.width - 48px, 260px); height: 38px;
+        y: parent.height - root.content-bottom - self.height - 10px;
+        border-radius: 19px; background: Theme.raised; border-width: 1px; border-color: Theme.hairline;
+        drop-shadow-color: #00000066; drop-shadow-blur: 16px; drop-shadow-offset-y: 4px;
+        Label { width: parent.width; height: parent.height; text: root.toast; font-size: 14px; font-weight: 600; horizontal-alignment: center; }
+    }
+    Timer { interval: 1600ms; running: root.toast != ""; triggered => { root.toast = ""; } }
+
+    // ---- Album menu (hold an album) ----
+    if root.menu-key != "": Rectangle {
+        background: #00000099;
+        TouchArea { clicked => { root.menu-key = ""; } }
+        Rectangle {
+            x: 12px; width: parent.width - 24px; height: 176px;
+            y: parent.height - self.height - max(root.bottom-inset, 12px) - 8px;
+            border-radius: 22px; background: Theme.surface; border-width: 1px; border-color: Theme.hairline;
+            TouchArea { }
+            VerticalLayout {
+                padding: 16px; spacing: 10px;
+                Label { text: root.menu-title; font-size: 16px; font-weight: 700; height: 24px; horizontal-alignment: center; }
+                Pill {
+                    label: "Add to queue"; icon: @image-url("icons/queue.svg"); filled: true;
+                    clicked => { root.add-album-to-queue(root.menu-key); root.menu-key = ""; }
+                }
+                Pill { label: "Cancel"; clicked => { root.menu-key = ""; } }
             }
         }
     }
