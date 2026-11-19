@@ -77,6 +77,8 @@ enum Event {
     Lyrics(String, Option<Vec<lyrics::Line>>),
     /// The system default output device and every output device, by name.
     AudioDevices(Option<String>, Vec<String>),
+    /// Album tracks loaded in bulk (replacing all Plex ones after a refresh).
+    TracksLoaded(u64, HashMap<String, Vec<Entry>>, bool),
 }
 
 struct Prefetch {
@@ -1624,7 +1626,7 @@ impl State {
                 ui.set_connecting(false);
                 match result {
                     Ok((plex, albums)) => {
-                        self.load_loudness(plex.clone());
+                        self.sync_library(plex.clone(), &albums, tx);
                         self.apply_plex_connection(ui, plex);
                         self.publish_plex_libraries(ui);
                         self.plex_albums = albums;
@@ -1678,6 +1680,7 @@ impl State {
                 match result {
                     Ok(tracks) => {
                         self.loaded_tracks.insert(key, tracks.clone());
+                        self.save_tracks();
                         if !self.query.is_empty() {
                             let query = self.query.clone();
                             self.filter(&query);
@@ -1746,6 +1749,27 @@ impl State {
                     self.missing_art.insert(key);
                 }
             }
+            Event::TracksLoaded(generation, tracks, replace) if generation == self.cache_generation => {
+                let selected = ui.get_selected_key().to_string();
+                let waiting = !self.loaded_tracks.contains_key(&selected);
+                if replace {
+                    self.loaded_tracks.retain(|key, _| key.starts_with("local-album:"));
+                }
+                for key in tracks.keys() {
+                    self.tracks_pending.remove(key);
+                }
+                self.loaded_tracks.extend(tracks);
+                if !self.query.is_empty() {
+                    let query = self.query.clone();
+                    self.filter(&query);
+                }
+                // Fill in the open album only if it was still loading.
+                if waiting && let Some(tracks) = self.loaded_tracks.get(&selected).cloned() {
+                    self.present_tracks(ui, tracks);
+                }
+                self.save_tracks();
+            }
+            Event::TracksLoaded(..) => {}
             Event::AudioDevices(default, all) => {
                 self.default_device = default;
                 self.audio_devices = all;
@@ -1805,16 +1829,41 @@ impl State {
         }
     }
 
-    /// Fetches loudness in the background: only tracks not saved yet, or all of them
-    /// after Refresh. Saved for the next run.
-    fn load_loudness(&mut self, plex: Plex) {
+    /// Loads album tracks and loudness in the background: only what isn't saved yet,
+    /// or everything after Refresh. Both are saved for the next run.
+    fn sync_library(&mut self, plex: Plex, albums: &[Entry], tx: &Sender<Event>) {
         let all = std::mem::take(&mut self.reload_all_loudness);
         let wanted = self.data.preferences.plex_libraries.clone();
+        let known: HashMap<String, Vec<Entry>> = self
+            .loaded_tracks
+            .iter()
+            .filter(|(key, _)| !key.starts_with("local-album:"))
+            .map(|(key, tracks)| (key.clone(), tracks.clone()))
+            .collect();
+        let albums = albums.to_vec();
+        let (tx, generation) = (tx.clone(), self.cache_generation);
         thread::spawn(move || {
-            if plex.load_loudness(&wanted, all).is_ok()
-                && let Some(path) = loudness_path()
-            {
+            let sender = tx.clone();
+            let _ = plex.sync(&wanted, &albums, &known, all, |tracks| {
+                let _ = sender.send(Event::TracksLoaded(generation, tracks, all));
+            });
+            if let Some(path) = loudness_path() {
                 plex::save_loudness(&path);
+            }
+        });
+    }
+
+    /// Saves the Plex album tracks for the next run (in the background).
+    fn save_tracks(&self) {
+        let tracks: HashMap<String, Vec<Entry>> = self
+            .loaded_tracks
+            .iter()
+            .filter(|(key, _)| !key.starts_with("local-album:"))
+            .map(|(key, tracks)| (key.clone(), tracks.clone()))
+            .collect();
+        thread::spawn(move || {
+            if let (Some(path), Ok(bytes)) = (tracks_path(), serde_json::to_vec(&tracks)) {
+                let _ = std::fs::write(path, bytes);
             }
         });
     }
@@ -1963,6 +2012,29 @@ impl State {
 /// Where track loudness is saved between runs (next to the library data).
 fn loudness_path() -> Option<PathBuf> {
     Some(library::path()?.with_file_name("loudness.json"))
+}
+
+/// Where album tracks are saved between runs.
+fn tracks_path() -> Option<PathBuf> {
+    Some(library::path()?.with_file_name("tracks.json"))
+}
+
+/// Writes panics to crash.log next to the library data, to find what went wrong.
+fn log_panics(path: Option<PathBuf>) {
+    let Some(path) = path else { return };
+    std::panic::set_hook(Box::new(move |info| {
+        use std::io::Write;
+        let when = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        let message = format!(
+            "[{when}] Sonic {} panicked: {info}\n{}\n",
+            env!("CARGO_PKG_VERSION"),
+            std::backtrace::Backtrace::force_capture()
+        );
+        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            let _ = file.write_all(message.as_bytes());
+        }
+        eprintln!("{message}");
+    }));
 }
 
 /// Opens the named output device, or the system default when it's empty or gone.
@@ -2636,6 +2708,7 @@ fn main() -> Result<()> {
     if let Some(path) = loudness_path() {
         plex::restore_loudness(&path);
     }
+    log_panics(library::path().map(|path| path.with_file_name("crash.log")));
     ui.set_app_version(env!("CARGO_PKG_VERSION").into());
     ui.set_eq_preset_index(preferences.eq_preset.clamp(0, 6));
     ui.set_discord_id(preferences.discord_id.as_str().into());
@@ -2999,6 +3072,13 @@ fn main() -> Result<()> {
         }
     });
     state.borrow().publish_local_folders(&ui);
+    // Album tracks saved by an earlier run: albums open instantly, nothing reloads.
+    if let Some(saved) = tracks_path()
+        .and_then(|path| std::fs::read(path).ok())
+        .and_then(|bytes| serde_json::from_slice::<HashMap<String, Vec<Entry>>>(&bytes).ok())
+    {
+        state.borrow_mut().loaded_tracks.extend(saved);
+    }
     ui.on_open_local_folder({
         let state = state.clone();
         move || {

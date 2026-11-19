@@ -98,6 +98,8 @@ enum Event {
     Lyrics(String, Option<Vec<lyrics::Line>>),
     /// Full-size cover (encoded) for the lock screen, by album key.
     NowArt(String, Vec<u8>),
+    /// Album tracks loaded in bulk (replacing the saved ones after a refresh).
+    TracksLoaded(HashMap<String, Vec<Entry>>, bool),
     FmRestored(Option<lastfm::Session>),
     FmPending(u64, Result<lastfm::Pending>),
     FmConnected(u64, Result<lastfm::Session>),
@@ -234,7 +236,7 @@ struct App {
     current: usize,
     generation: u64,
     stream: Option<OutputStream>,
-    sink: Option<Sink>,
+    sink: Option<Arc<Sink>>,
     playing: bool,
     equalizer: Arc<eq::Settings>,
     album_model: Rc<VecModel<AlbumItem>>,
@@ -672,8 +674,12 @@ impl App {
     }
 
     fn seek(&mut self, seconds: f32) {
-        if let Some(sink) = &self.sink {
-            let _ = sink.try_seek(Duration::from_secs_f32(seconds.max(0.0)));
+        if let Some(sink) = self.sink.clone() {
+            // A seek past what's downloaded waits for the stream, so it runs off
+            // the UI thread; the app stays responsive meanwhile.
+            thread::spawn(move || {
+                let _ = sink.try_seek(Duration::from_secs_f32(seconds.max(0.0)));
+            });
         }
         self.publish_system();
     }
@@ -783,6 +789,12 @@ impl App {
         });
     }
 
+    /// Saves the album tracks for the next run (in the background).
+    fn save_tracks(&self) {
+        let tracks = self.tracks.clone();
+        thread::spawn(move || write_json(cache_path("tracks.json"), &tracks));
+    }
+
     fn save_unsent(&self) {
         write_json(data_path("scrobbles.json"), &self.fm_unsent);
     }
@@ -794,14 +806,18 @@ impl App {
                 ui.set_signed_in(true);
                 ui.set_status(format!("{} albums from Plex.", albums.len()).into());
                 sort_albums(&mut albums);
-                write_json(cache_path("albums.json"), &albums);
-                // Loudness in the background: new tracks only, or everything after a refresh.
+                // Album tracks and loudness in the background: only what isn't saved
+                // yet, or everything after a refresh. Saved for the next run.
                 let (loader, wanted) = (plex.clone(), self.settings.libraries.clone());
                 let all = std::mem::take(&mut self.reload_all_loudness);
+                let (list, known, tx) = (albums.clone(), self.tracks.clone(), self.tx.clone());
                 thread::spawn(move || {
-                    if loader.load_loudness(&wanted, all).is_ok()
-                        && let Some(path) = cache_path("loudness.json")
-                    {
+                    write_json(cache_path("albums.json"), &list);
+                    let sender = tx.clone();
+                    let _ = loader.sync(&wanted, &list, &known, all, |tracks| {
+                        let _ = sender.send(Event::TracksLoaded(tracks, all));
+                    });
+                    if let Some(path) = cache_path("loudness.json") {
                         plex::save_loudness(&path);
                     }
                 });
@@ -843,6 +859,7 @@ impl App {
                 match result {
                     Ok(tracks) => {
                         self.tracks.insert(key.clone(), tracks);
+                        self.save_tracks();
                         if key == self.open_album {
                             self.publish_tracks(ui);
                         }
@@ -871,7 +888,7 @@ impl App {
                         }
                     }
                     if let Some(stream) = &self.stream {
-                        let sink = Sink::connect_new(stream.mixer());
+                        let sink = Arc::new(Sink::connect_new(stream.mixer()));
                         // Desktop test runs can be silenced; there is no such switch on iOS.
                         #[cfg(not(target_os = "ios"))]
                         if std::env::var_os("SONIC_MUTE").is_some() {
@@ -886,7 +903,10 @@ impl App {
                         ui.set_leveling_note(plex::leveling_note(loudness, album).into());
                         sink.append(eq::Equalizer::new(decoder, self.equalizer.clone()).with_level(level));
                         if let Some(at) = self.resume_at.take() {
-                            let _ = sink.try_seek(Duration::from_secs_f32(at));
+                            let resumed = sink.clone();
+                            thread::spawn(move || {
+                                let _ = resumed.try_seek(Duration::from_secs_f32(at));
+                            });
                         }
                         if !self.playing {
                             sink.pause();
@@ -903,6 +923,18 @@ impl App {
                 }
             },
             Event::Audio(..) => {}
+            Event::TracksLoaded(tracks, replace) => {
+                if replace {
+                    self.tracks.clear();
+                }
+                self.tracks.extend(tracks);
+                // Fill in the open album only if it was still loading.
+                if ui.get_tracks_loading() && self.tracks.contains_key(&self.open_album) {
+                    ui.set_tracks_loading(false);
+                    self.publish_tracks(ui);
+                }
+                self.save_tracks();
+            }
             Event::NowArt(key, bytes) => {
                 if self.now_art_pending == key {
                     self.now_art_pending.clear();
@@ -1088,7 +1120,28 @@ fn open_audio(
     Ok((decoder.build().context("Decoding audio")?, loudness))
 }
 
+/// Writes panics to Caches/Sonic/crash.log, to find what went wrong.
+fn log_panics() {
+    let Some(path) = cache_path("crash.log") else { return };
+    std::panic::set_hook(Box::new(move |info| {
+        use std::io::Write;
+        let message = format!(
+            "[{}] Sonic {} panicked: {info}\n{}\n",
+            now_seconds(),
+            env!("CARGO_PKG_VERSION"),
+            std::backtrace::Backtrace::force_capture()
+        );
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            let _ = file.write_all(message.as_bytes());
+        }
+    }));
+}
+
 fn main() -> Result<()> {
+    log_panics();
     #[cfg(target_os = "ios")]
     ios::start_audio_session();
 
@@ -1148,6 +1201,9 @@ fn main() -> Result<()> {
         let _ = plex::set_manual_address(&app.settings.server_address);
         if let Some(path) = cache_path("loudness.json") {
             plex::restore_loudness(&path);
+        }
+        if let Some(tracks) = read_json::<HashMap<String, Vec<Entry>>>(cache_path("tracks.json")) {
+            app.tracks = tracks;
         }
         // Show the last known library straight away while Plex refreshes it.
         if let Some(albums) = read_json::<Vec<Entry>>(cache_path("albums.json")) {
@@ -1234,8 +1290,10 @@ fn main() -> Result<()> {
         app.albums.clear();
         app.tracks.clear();
         app.queue.clear();
-        if let Some(path) = cache_path("albums.json") {
-            let _ = std::fs::remove_file(path);
+        for name in ["albums.json", "tracks.json", "loudness.json"] {
+            if let Some(path) = cache_path(name) {
+                let _ = std::fs::remove_file(path);
+            }
         }
         app.publish_albums(&ui);
         app.publish_libraries(&ui);
@@ -1292,7 +1350,6 @@ fn main() -> Result<()> {
             return;
         }
         app.reload_all_loudness = true;
-        app.tracks.clear();
         app.reload_plex(&ui);
     });
     on!(on_set_columns, |app, ui, columns| {

@@ -680,35 +680,57 @@ impl Plex {
         Some(loudness)
     }
 
-    /// Loads loudness for the chosen libraries' tracks in a few batched requests:
-    /// every track (`all`), or only those not known yet. Returns how many were found.
-    pub fn load_loudness(&self, wanted: &[String], all: bool) -> Result<usize> {
+    /// Every track in the chosen libraries in a few large pages, grouped by album key
+    /// and in album order. Stops after `limit` tracks (the rest load per album).
+    pub fn all_tracks(&self, wanted: &[String], limit: usize) -> Result<HashMap<String, Vec<Entry>>> {
         let mut sections = self.chosen_sections(wanted);
         if sections.is_empty() {
             sections.push(self.library.clone());
         }
-        let mut keys = Vec::new();
-        for section in sections {
+        let mut albums: HashMap<String, Vec<Entry>> = HashMap::new();
+        let mut count = 0usize;
+        'sections: for section in sections {
             let mut start = 0usize;
             loop {
                 let first = start.to_string();
-                let page: serde_json::Value = self
+                let page = self
                     .send(&format!("/library/sections/{section}/all"), |request| {
-                        request.query(&[
-                            ("type", "10"),
-                            ("X-Plex-Container-Start", first.as_str()),
-                            ("X-Plex-Container-Size", "1000"),
-                        ])
+                        request
+                            .query(&[
+                                ("type", "10"),
+                                ("X-Plex-Container-Start", first.as_str()),
+                                ("X-Plex-Container-Size", "1000"),
+                            ])
+                            .timeout(Duration::from_secs(60))
                     })?
-                    .json()?;
-                let items = page["MediaContainer"]["Metadata"].as_array().cloned().unwrap_or_default();
-                keys.extend(items.iter().filter_map(|item| item["ratingKey"].as_str().map(str::to_owned)));
-                start += items.len();
-                if items.len() < 1000 {
+                    .json::<Envelope<Items>>()?
+                    .container
+                    .entries;
+                let size = page.len();
+                for track in page {
+                    if !track.parent_rating_key.is_empty() {
+                        albums.entry(track.parent_rating_key.clone()).or_default().push(track);
+                        count += 1;
+                    }
+                }
+                start += size;
+                if size < 1000 {
                     break;
+                }
+                if count >= limit {
+                    break 'sections;
                 }
             }
         }
+        for tracks in albums.values_mut() {
+            tracks.sort_by_key(|track| (track.disc, track.index));
+        }
+        Ok(albums)
+    }
+
+    /// Loads loudness for these tracks in batched requests: all of them (`all`), or
+    /// only those not known yet. Returns how many were found.
+    pub fn load_loudness(&self, mut keys: Vec<String>, all: bool) -> Result<usize> {
         if !all && let Ok(cache) = LOUDNESS.lock() {
             keys.retain(|key| !cache.contains_key(key));
         }
@@ -729,6 +751,46 @@ impl Plex {
             }
         }
         Ok(found)
+    }
+
+    /// Background library sync after the album list loads: album tracks, then their
+    /// loudness. Loads only what isn't known yet, unless `all` (a manual refresh).
+    /// `known` holds the album tracks already saved; new tracks are passed to
+    /// `loaded` as soon as they're in, before loudness is fetched.
+    pub fn sync(
+        &self,
+        wanted: &[String],
+        albums: &[Entry],
+        known: &HashMap<String, Vec<Entry>>,
+        all: bool,
+        loaded: impl FnOnce(HashMap<String, Vec<Entry>>),
+    ) -> Result<()> {
+        const TRACK_LIMIT: usize = 100_000;
+        let missing: Vec<&Entry> = albums
+            .iter()
+            .filter(|album| album.local_path.is_none() && !known.contains_key(&album.rating_key))
+            .collect();
+        let tracks = if all || known.is_empty() || missing.len() > 40 {
+            self.all_tracks(wanted, TRACK_LIMIT)?
+        } else {
+            let mut tracks = HashMap::new();
+            for album in missing {
+                if let Ok(list) = self.tracks(album) {
+                    tracks.insert(album.rating_key.clone(), list);
+                }
+            }
+            tracks
+        };
+        let keys: Vec<String> = tracks
+            .values()
+            .chain(if all { None } else { Some(known.values()) }.into_iter().flatten())
+            .flatten()
+            .filter(|track| track.local_path.is_none())
+            .map(|track| track.rating_key.clone())
+            .collect();
+        loaded(tracks);
+        self.load_loudness(keys, all)?;
+        Ok(())
     }
 
     pub fn track_audio(&self, track: &Entry) -> Result<reqwest::blocking::Response> {
