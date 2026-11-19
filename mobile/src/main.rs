@@ -869,6 +869,7 @@ impl App {
                                 self.queue.first().is_some_and(|first| t.parent_rating_key == first.parent_rating_key)
                             });
                         let level = loudness.map_or(1.0, |l| l.gain(album));
+                        ui.set_leveling_note(plex::leveling_note(loudness, album).into());
                         sink.append(eq::Equalizer::new(decoder, self.equalizer.clone()).with_level(level));
                         if let Some(at) = self.resume_at.take() {
                             let _ = sink.try_seek(Duration::from_secs_f32(at));

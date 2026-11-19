@@ -111,6 +111,8 @@ struct State {
     audio_devices: Vec<String>,
     /// Pause as soon as the song restarts (moving to a new output while paused).
     pause_after_start: bool,
+    /// What volume leveling applies to the playing song (shown in Settings).
+    leveling_note: String,
     /// Page shown on the previous tick, to refresh views when the user arrives on them.
     last_page: i32,
     /// Playlist cover mosaics, keyed by the album art keys they were built from.
@@ -1334,7 +1336,9 @@ impl State {
         {
             let mut prefetch = self.prefetch.take().unwrap();
             let audio = prefetch.audio.take().unwrap();
-            let level = audio.loudness.map_or(1.0, |l| l.gain(album_mode(&self.queue, self.shuffled)));
+            let album = album_mode(&self.queue, self.shuffled);
+            let level = audio.loudness.map_or(1.0, |l| l.gain(album));
+            self.leveling_note = plex::leveling_note(audio.loudness, album);
             let started = Arc::new(AtomicBool::new(false));
             self.handoff = Some(Handoff {
                 track,
@@ -1874,7 +1878,9 @@ impl State {
                 _stream: stream,
             });
         }
-        let level = audio.loudness.map_or(1.0, |l| l.gain(album_mode(&self.queue, self.shuffled)));
+        let album = album_mode(&self.queue, self.shuffled);
+        let level = audio.loudness.map_or(1.0, |l| l.gain(album));
+        self.leveling_note = plex::leveling_note(audio.loudness, album);
         if let Some(player) = &mut self.player {
             player.download = audio.download;
             player
@@ -2594,6 +2600,7 @@ fn main() -> Result<()> {
         default_device: None,
         audio_devices: Vec::new(),
         pause_after_start: false,
+        leveling_note: String::new(),
         mosaics: RefCell::new(HashMap::new()),
         theme_fade: ThemeFade::default(),
         lyrics_key: String::new(),
@@ -3992,6 +3999,9 @@ fn main() -> Result<()> {
             }
         }
         state.sync_lyrics(&ui, &tx);
+        if ui.get_leveling_note().as_str() != state.leveling_note {
+            ui.set_leveling_note(state.leveling_note.as_str().into());
+        }
         if ui.get_page() != state.last_page {
             state.last_page = ui.get_page();
             if state.last_page == 3 && ui.get_playlist_current() < 0 {

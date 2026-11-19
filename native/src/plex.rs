@@ -140,6 +140,14 @@ impl Loudness {
         linear
     }
 
+    /// What leveling does with this song, e.g. "album gain −10.7 dB".
+    pub fn describe(&self, album: bool) -> String {
+        let album = album && self.album_gain.is_some();
+        let db = 20.0 * self.gain(album).log10();
+        let kind = if album { "album" } else { "track" };
+        format!("{kind} gain {}{:.1} dB", if db < 0.0 { "−" } else { "+" }, db.abs())
+    }
+
     fn found(self) -> Option<Self> {
         (self.track_gain.is_some() || self.album_gain.is_some()).then_some(self)
     }
@@ -151,6 +159,14 @@ pub(crate) fn parse_gain(text: &str) -> Option<f32> {
 }
 
 static LOUDNESS: LazyLock<Mutex<HashMap<String, Option<Loudness>>>> = LazyLock::new(Default::default);
+
+/// The settings line for a song's leveling.
+pub fn leveling_note(loudness: Option<Loudness>, album: bool) -> String {
+    match loudness {
+        Some(loudness) => format!("Now playing: {}", loudness.describe(album)),
+        None => "Now playing: Plex hasn't analyzed this song's loudness yet, so it plays unchanged.".into(),
+    }
+}
 
 /// An address typed in Settings (e.g. "203.0.113.7:25565"), tried right after the
 /// home network.
@@ -603,7 +619,7 @@ impl Plex {
         }
         let value: serde_json::Value = self
             .send(&format!("/library/metadata/{}", track.rating_key), |request| {
-                request.timeout(Duration::from_secs(5))
+                request.query(&[("includeLoudnessRamps", "1")]).timeout(Duration::from_secs(5))
             })
             .ok()?
             .json()
@@ -630,7 +646,11 @@ impl Plex {
                 break;
             }
         }
-        if let Ok(mut cache) = LOUDNESS.lock() {
+        // Only remember what was found: a song Plex hasn't analyzed yet is asked
+        // about again next time (it's usually analyzed minutes after it's added).
+        if loudness.is_some()
+            && let Ok(mut cache) = LOUDNESS.lock()
+        {
             cache.insert(track.rating_key.clone(), loudness);
         }
         loudness

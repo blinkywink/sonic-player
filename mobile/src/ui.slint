@@ -267,6 +267,7 @@ export component MobileApp inherits Window {
 
     in property <int> eq-preset;
     in property <bool> normalizer;
+    in property <string> leveling-note;
     in property <bool> online-lyrics: true;
     in property <bool> fm-connected;
     in property <bool> fm-pending;
@@ -570,6 +571,7 @@ export component MobileApp inherits Window {
                 Segmented { options: ["Flat", "Bass", "Treble"]; current: root.eq-preset; chosen(index) => { root.set-eq(index); } }
                 Segmented { options: ["Rock", "Jazz", "Classical"]; current: root.eq-preset - 3; chosen(index) => { root.set-eq(index + 3); } }
                 SwitchRow { label: "Volume leveling"; detail: "Uses your Plex server's loudness analysis: whole albums at one level, songs evened out on shuffle."; on: root.normalizer; toggled => { root.toggle-normalizer(); } }
+                if root.normalizer && root.leveling-note != "": Text { text: root.leveling-note; wrap: word-wrap; color: Theme.accent-text; font-size: 13px; }
                 SwitchRow { label: "Find lyrics online"; detail: "Look up lyrics on LRCLIB when Plex has none."; on: root.online-lyrics; toggled => { root.toggle-online-lyrics(); } }
             }
             Card {

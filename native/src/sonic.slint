@@ -557,6 +557,8 @@ export component Sonic inherits Window {
     in property <string> eq-line;
     in property <string> eq-area;
     in property <bool> normalizer-enabled;
+    // What leveling applies to the playing song.
+    in property <string> leveling-note;
     callback toggle-normalizer;
     callback eq-band(int, float);
     callback eq-level(float);
@@ -1604,6 +1606,7 @@ export component Sonic inherits Window {
                             Label { text: "Loudness normalizer"; height: 22px; }
                         }
                         HorizontalLayout { padding-left: 28px; Text { text: "Uses your Plex server's loudness analysis (or ReplayGain tags) before each song starts: albums play at one level, as mastered, and songs are evened out on shuffle or mixed queues."; wrap: word-wrap; color: Palette.muted; font-size: 12px; vertical-stretch: 0; horizontal-stretch: 1; } }
+                        if root.normalizer-enabled && root.leveling-note != "": HorizontalLayout { padding-left: 28px; Text { text: root.leveling-note; wrap: word-wrap; color: Palette.text; font-size: 12px; vertical-stretch: 0; horizontal-stretch: 1; } }
                         Rectangle { height: 22px; HorizontalLayout {
                             spacing: 10px; alignment: start;
                             accessible-role: checkbox; accessible-label: "Find lyrics online";
