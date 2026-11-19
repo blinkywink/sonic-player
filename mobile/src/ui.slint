@@ -425,7 +425,7 @@ export component MobileApp inherits Window {
                 Cover {
                     x: 48px; y: 0; width: parent.width - 96px; height: self.width;
                     art: root.album-art; radius: 16px;
-                    drop-shadow-color: #00000080; drop-shadow-blur: 32px; drop-shadow-offset-y: 14px;
+                    drop-shadow-color: #00000080; drop-shadow-blur: 18px; drop-shadow-offset-y: 8px;
                 }
                 Label { x: 20px; y: parent.width - 96px + 18px; width: parent.width - 40px; height: 30px; text: root.album-title; font-size: 22px; font-weight: 800; horizontal-alignment: center; }
                 Label {
@@ -735,9 +735,8 @@ export component MobileApp inherits Window {
         animate y { duration: root.sheet-dragging ? 0ms : 320ms; easing: ease-out-quart; }
         background: Theme.background;
         clip: true;
-        // Soft backdrop from the cover.
-        Image { width: parent.width; height: parent.width; source: root.now-art; image-fit: cover; opacity: 0.35; }
-        Rectangle { background: @linear-gradient(180deg, #0f172a55 0%, #0f172ae6 45%, #0f172a 70%); }
+        // Soft, clean backdrop (a stretched small cover looked blocky here).
+        Rectangle { background: @linear-gradient(180deg, #1e2b49 0%, #0f172a 60%); }
         // Drag anywhere (outside the controls) to pull it down.
         TouchArea {
             property <length> press;
@@ -773,7 +772,7 @@ export component MobileApp inherits Window {
                 Cover {
                     width: parent.height; height: parent.height; x: (parent.width - self.width) / 2;
                     art: root.now-art; radius: 18px;
-                    drop-shadow-color: #00000099; drop-shadow-blur: 40px; drop-shadow-offset-y: 18px;
+                    drop-shadow-color: #00000080; drop-shadow-blur: 18px; drop-shadow-offset-y: 8px;
                 }
             }
             Rectangle { vertical-stretch: 1; min-height: 20px; }
