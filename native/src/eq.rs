@@ -147,14 +147,100 @@ pub struct Equalizer<S> {
     channel: usize,
     remaining: u16,
     compressor: bool,
-    peak: f32,
-    reduction: f32,
-    attack: f32,
-    release: f32,
+    leveler: Leveler,
     meter: Meter,
     /// Output gain for seek fades (0 = silent, 1 = normal) and its per-frame step.
     fade: f32,
     fade_step: f32,
+}
+
+/// Volume leveling: one steady gain per song, not compression. It measures the song's
+/// loudness (ignoring silence) over the first few seconds, sets a gain that brings it to
+/// a common level, then only drifts very slowly, so loud and quiet parts of a song keep
+/// their balance. A fast limiter catches the rare peaks that would clip.
+#[derive(Default)]
+struct Leveler {
+    /// Sum of squares of the current frame (all channels) and of the current block.
+    frame: f32,
+    block: f32,
+    block_frames: u32,
+    block_len: u32,
+    /// Loudness estimate (mean square) and how many loud blocks it has seen.
+    estimate: f32,
+    blocks: u32,
+    /// Gain in dB the leveler is heading to, and the linear gain applied now.
+    gain_db: f32,
+    gain: f32,
+    smoothing: f32,
+    limiter: f32,
+    limiter_release: f32,
+}
+
+impl Leveler {
+    /// Level songs are brought to (RMS dBFS), and how far they may be moved.
+    const TARGET_DB: f32 = -14.0;
+    const MAX_CUT_DB: f32 = 12.0;
+    const MAX_BOOST_DB: f32 = 9.0;
+    /// Blocks quieter than this are silence and don't count.
+    const GATE: f32 = 1e-5;
+    /// Output ceiling (-1 dBFS).
+    const CEILING: f32 = 0.891;
+    /// The first 3 seconds of loud audio set the level quickly.
+    const SETTLE_BLOCKS: u32 = 30;
+
+    fn reset(&mut self, rate: u32) {
+        let rate = rate.max(1) as f32;
+        *self = Self {
+            block_len: (rate * 0.1) as u32,
+            gain: 1.0,
+            smoothing: 1.0 - (-1.0 / (rate * 0.05)).exp(),
+            limiter: 1.0,
+            limiter_release: 1.0 - (-1.0 / (rate * 0.15)).exp(),
+            ..Self::default()
+        };
+    }
+
+    fn sample(&mut self, sample: f32) -> f32 {
+        self.frame += sample * sample;
+        let level = sample * self.gain;
+        let peak = level.abs() * self.limiter;
+        if peak > Self::CEILING {
+            self.limiter = Self::CEILING / level.abs().max(1e-9);
+        }
+        level * self.limiter
+    }
+
+    fn end_frame(&mut self, channels: usize) {
+        self.block += self.frame / channels.max(1) as f32;
+        self.frame = 0.0;
+        self.block_frames += 1;
+        self.limiter += (1.0 - self.limiter) * self.limiter_release;
+        let target = 10.0f32.powf(self.gain_db / 20.0);
+        self.gain += (target - self.gain) * self.smoothing;
+        if self.block_frames < self.block_len.max(1) {
+            return;
+        }
+        let mean_square = self.block / self.block_frames as f32;
+        self.block = 0.0;
+        self.block_frames = 0;
+        if mean_square < Self::GATE {
+            return;
+        }
+        let settling = self.blocks < Self::SETTLE_BLOCKS;
+        if self.blocks == 0 {
+            self.estimate = mean_square;
+        } else {
+            // About 1 s to settle at the start, then a 30 s memory.
+            let memory = if settling { 1.0 } else { 30.0 };
+            self.estimate += (mean_square - self.estimate) * (1.0 - (-0.1f32 / memory).exp());
+        }
+        self.blocks = self.blocks.saturating_add(1);
+        let wanted = (Self::TARGET_DB - 10.0 * self.estimate.max(1e-9).log10())
+            .clamp(-Self::MAX_CUT_DB, Self::MAX_BOOST_DB);
+        // Move quickly while settling, then by at most 0.5 dB per second.
+        let step = if settling { 1.0 } else { 0.05 };
+        self.gain_db += (wanted - self.gain_db).clamp(-step, step);
+    }
 }
 
 /// Splits the output into four bands with one-pole low-passes and accumulates their energy.
@@ -220,10 +306,7 @@ impl<S: Source> Equalizer<S> {
             channel: 0,
             remaining: 0,
             compressor: false,
-            peak: 0.0,
-            reduction: 0.0,
-            attack: 0.0,
-            release: 0.0,
+            leveler: Leveler::default(),
             meter: Meter::default(),
             fade: 1.0,
             fade_step: 1.0,
@@ -241,9 +324,11 @@ impl<S: Source> Equalizer<S> {
             return;
         }
         self.revision = revision;
+        // EQ changes land here too; keep the song's level unless the format changed.
+        if self.leveler.block_len == 0 || self.rate != rate {
+            self.leveler.reset(rate);
+        }
         self.rate = rate;
-        self.attack = 1.0 - (-1.0 / (rate as f32 * 0.003)).exp();
-        self.release = 1.0 - (-1.0 / (rate as f32 * 0.250)).exp();
         self.meter.reset(rate);
         // About 12 ms to fade fully out or back in.
         self.fade_step = 1.0 / (rate.max(1) as f32 * 0.012);
@@ -273,34 +358,13 @@ impl<S: Source> Iterator for Equalizer<S> {
             }
         }
         if self.compressor {
-            self.peak = self.peak.max(sample.abs());
-            sample *= 10.0_f32.powf(self.reduction / 20.0);
+            sample = self.leveler.sample(sample);
         }
         self.channel += 1;
         if self.channel == self.delays.len() {
             self.channel = 0;
             if self.compressor {
-                // The original Web Audio compressor uses a -24 dB threshold,
-                // 30 dB knee, 12:1 ratio, 3 ms attack and 250 ms release.
-                let over = 20.0 * self.peak.max(0.000_001).log10() + 24.0;
-                let amount = if over < -15.0 {
-                    0.0
-                } else if over > 15.0 {
-                    over
-                } else {
-                    (over + 15.0).powi(2) / 60.0
-                };
-                let target = (1.0 / 12.0 - 1.0) * amount;
-                let speed = if target < self.reduction {
-                    self.attack
-                } else {
-                    self.release
-                };
-                self.reduction += (target - self.reduction) * speed;
-                self.peak = 0.0;
-            } else {
-                self.reduction = 0.0;
-                self.peak = 0.0;
+                self.leveler.end_frame(self.delays.len());
             }
         }
         // Apply the user gain after normalization so compression can't undo it.
@@ -339,8 +403,8 @@ impl<S: Source> Source for Equalizer<S> {
         self.delays.fill([Delay::default(); 20]);
         self.channel = 0;
         self.remaining = 0;
-        self.peak = 0.0;
-        self.reduction = 0.0;
+        // Same song: keep its level, just drop the partly measured frame.
+        self.leveler.frame = 0.0;
         Ok(())
     }
 }
@@ -349,6 +413,30 @@ impl<S: Source> Source for Equalizer<S> {
 mod tests {
     use super::*;
     use rodio::buffer::SamplesBuffer;
+
+    #[test]
+    fn leveling_brings_songs_toward_one_level_without_clipping() {
+        let settings = Arc::new(Settings::default());
+        settings.set_normalizer(true);
+        let rate = 48_000usize;
+        let tone = |amplitude: f32| -> Vec<f32> {
+            (0..rate * 10).map(|i| amplitude * (i as f32 * 0.05).sin()).collect()
+        };
+        let rms = |samples: &[f32]| {
+            (samples.iter().map(|x| x * x).sum::<f32>() / samples.len() as f32).sqrt()
+        };
+        let level = |amplitude: f32| -> Vec<f32> {
+            Equalizer::new(SamplesBuffer::new(1, rate as u32, tone(amplitude)), settings.clone())
+                .collect()
+        };
+        let (quiet, loud) = (level(0.04), level(0.95));
+        let last_second = |samples: &Vec<f32>| rms(&samples[samples.len() - rate..]);
+        // A quiet song is raised (by at most 9 dB), a loud one turned down.
+        assert!(last_second(&quiet) > rms(&tone(0.04)) * 2.0);
+        assert!(last_second(&loud) < rms(&tone(0.95)) * 0.6);
+        // Peaks never pass the -1 dBFS ceiling, even before the level settles.
+        assert!(loud.iter().all(|x| x.abs() <= 0.9));
+    }
 
     #[test]
     fn flat_bands_preserve_interleaved_samples() {

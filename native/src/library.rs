@@ -42,6 +42,8 @@ pub struct Preferences {
     pub plex_libraries: Vec<String>,
     /// Plex server address to try when away from home (e.g. "203.0.113.7:25565").
     pub plex_address: String,
+    /// Output device by name; empty follows the system default.
+    pub audio_device: String,
 }
 
 impl Default for Preferences {
@@ -71,6 +73,7 @@ impl Default for Preferences {
             online_lyrics: true,
             plex_libraries: Vec::new(),
             plex_address: String::new(),
+            audio_device: String::new(),
         }
     }
 }

@@ -28,6 +28,9 @@ mod ios {
         let _ = open::that_detached(url);
     }
     pub fn open_pending() {}
+    pub fn is_active() -> bool {
+        true
+    }
 }
 #[allow(dead_code)] // Shared with the desktop app, which uses more of it.
 #[path = "../../native/src/lastfm.rs"]
@@ -251,6 +254,13 @@ struct App {
     fm_sending: bool,
     fm_last_retry: Instant,
     last_tick: Instant,
+    /// Where the song was at the last tick, and how often it has been resumed after
+    /// the stream dropped out (so a flaky connection doesn't skip the song).
+    last_position: f32,
+    resumes: u32,
+    resume_at: Option<f32>,
+    /// Whether the app was on screen at the last tick.
+    was_active: bool,
 }
 
 impl App {
@@ -556,6 +566,9 @@ impl App {
         }
         self.sink = None;
         self.playing = true;
+        self.last_position = 0.0;
+        self.resumes = 0;
+        self.resume_at = None;
         ui.set_position(0.0);
         self.publish_now_playing(ui);
         self.publish_queue(ui);
@@ -566,6 +579,16 @@ impl App {
         if let Some(album) = self.albums.iter().find(|a| a.rating_key == track.parent_rating_key).cloned() {
             self.fetch_art(&album);
         }
+        let (tx, plex, generation) = (self.tx.clone(), self.plex.clone(), self.generation);
+        thread::spawn(move || {
+            let _ = tx.send(Event::Audio(generation, open_audio(plex, &track)));
+        });
+    }
+
+    /// Opens the current song's audio again (after a dropout), keeping everything else.
+    fn reopen_current(&mut self) {
+        let Some(track) = self.queue.get(self.current).cloned() else { return };
+        self.generation += 1;
         let (tx, plex, generation) = (self.tx.clone(), self.plex.clone(), self.generation);
         thread::spawn(move || {
             let _ = tx.send(Event::Audio(generation, open_audio(plex, &track)));
@@ -839,6 +862,9 @@ impl App {
                             sink.set_volume(0.0);
                         }
                         sink.append(eq::Equalizer::new(decoder, self.equalizer.clone()));
+                        if let Some(at) = self.resume_at.take() {
+                            let _ = sink.try_seek(Duration::from_secs_f32(at));
+                        }
                         if !self.playing {
                             sink.pause();
                         }
@@ -932,9 +958,31 @@ impl App {
             self.fm_last_retry = Instant::now();
             self.send_scrobbles();
         }
+        // Coming back on screen: redraw everything (iOS skips drawing in the
+        // background, so the play button could look stale) and re-check the state.
+        let active = ios::is_active();
+        if active && !self.was_active {
+            if let Some(sink) = &self.sink {
+                self.playing = !sink.is_paused() && !sink.empty();
+            }
+            ui.set_playing(self.playing);
+            ui.set_repaint(!ui.get_repaint());
+            ui.window().request_redraw();
+        }
+        self.was_active = active;
         let Some(sink) = &self.sink else { return };
         if sink.empty() {
             if self.playing {
+                // Ended well before its length: the stream dropped out. Reopen it
+                // where it stopped instead of skipping (a few times per song).
+                let length = self.queue.get(self.current).map(|t| t.duration as f32 / 1000.0).unwrap_or(0.0);
+                if self.last_position > 1.0 && self.last_position < length - 4.0 && self.resumes < 3 {
+                    self.resumes += 1;
+                    self.resume_at = Some(self.last_position);
+                    self.sink = None;
+                    self.reopen_current();
+                    return;
+                }
                 self.step(ui, true);
             }
             return;
@@ -945,6 +993,7 @@ impl App {
         }
         let Some(sink) = &self.sink else { return };
         let position = sink.get_pos().as_secs_f32();
+        self.last_position = position;
         ui.set_position(position);
         if ui.get_lyrics_synced() {
             let lines = self.lyrics_cache.get(&self.lyrics_key).cloned().flatten().unwrap_or_default();
@@ -1052,6 +1101,10 @@ fn main() -> Result<()> {
         fm_sending: false,
         fm_last_retry: Instant::now(),
         last_tick: Instant::now(),
+        last_position: 0.0,
+        resumes: 0,
+        resume_at: None,
+        was_active: true,
     }));
     {
         let mut app = app.borrow_mut();

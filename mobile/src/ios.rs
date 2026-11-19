@@ -146,6 +146,19 @@ pub fn take_commands() -> Vec<Remote> {
     COMMANDS.lock().map(|mut commands| std::mem::take(&mut *commands)).unwrap_or_default()
 }
 
+/// Whether the app is on screen (iOS doesn't draw it while in the background).
+pub fn is_active() -> bool {
+    let Some(app_class) = class(c"UIApplication") else { return true };
+    unsafe {
+        let app: *mut AnyObject = msg_send![app_class, sharedApplication];
+        if app.is_null() {
+            return true;
+        }
+        let state: isize = msg_send![app, applicationState];
+        state == 0 // UIApplicationStateActive
+    }
+}
+
 /// Album key whose artwork is currently loaded for the lock screen.
 pub fn artwork_key() -> Option<String> {
     ARTWORK.with(|art| art.borrow().as_ref().map(|(key, _)| key.clone()))

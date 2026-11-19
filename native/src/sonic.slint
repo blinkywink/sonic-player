@@ -581,6 +581,10 @@ export component Sonic inherits Window {
     // Plex address to try away from home, e.g. "203.0.113.7:25565".
     in-out property <string> plex-address;
     callback apply-plex-address;
+    // "System default" followed by the output devices.
+    in property <[string]> audio-devices: ["System default"];
+    in-out property <int> audio-device-index;
+    callback choose-audio-device(int);
     in-out property <string> discord-image;
     in property <string> discord-status;
     callback discord-test;
@@ -1571,6 +1575,18 @@ export component Sonic inherits Window {
                         Label { text: "Sonic " + root.app-version; font-size: 12px; color: Palette.muted; width: 90px; horizontal-alignment: right; }
                     }
                     if root.settings-tab == 0: SettingsCard {
+                        Label { text: "Output"; font-weight: 700; font-size: 16px; height: 23px; }
+                        HorizontalLayout {
+                            spacing: 12px; alignment: start;
+                            Label { text: "Output device"; width: 110px; color: Palette.muted; font-size: 13px; }
+                            ComboBox {
+                                width: 300px; model: root.audio-devices; current-index <=> root.audio-device-index;
+                                selected => { root.choose-audio-device(self.current-index); }
+                            }
+                        }
+                        Text { text: "System default follows Windows, so Sonic switches when you connect headphones or a speaker."; wrap: word-wrap; color: Palette.muted; font-size: 12px; }
+                    }
+                    if root.settings-tab == 0: SettingsCard {
                         Label { text: "Parametric EQ & normalization"; font-weight: 700; font-size: 16px; height: 23px; }
                         HorizontalLayout {
                             spacing: 10px; alignment: start;
@@ -1587,7 +1603,7 @@ export component Sonic inherits Window {
                             }
                             Label { text: "Loudness normalizer"; height: 22px; }
                         }
-                        HorizontalLayout { padding-left: 28px; Text { text: "Reduces volume differences between tracks so quiet songs and loud songs play at a more even level."; wrap: word-wrap; color: Palette.muted; font-size: 12px; vertical-stretch: 0; horizontal-stretch: 1; } }
+                        HorizontalLayout { padding-left: 28px; Text { text: "Plays every song at a similar volume, without squashing the loud and quiet parts within a song."; wrap: word-wrap; color: Palette.muted; font-size: 12px; vertical-stretch: 0; horizontal-stretch: 1; } }
                         Rectangle { height: 22px; HorizontalLayout {
                             spacing: 10px; alignment: start;
                             accessible-role: checkbox; accessible-label: "Find lyrics online";

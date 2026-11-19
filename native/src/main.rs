@@ -65,6 +65,8 @@ enum Event {
     SeekFinished(u64, Option<String>),
     Prefetched(u64, Result<Audio>),
     Lyrics(String, Option<Vec<lyrics::Line>>),
+    /// The system default output device and every output device, by name.
+    AudioDevices(Option<String>, Vec<String>),
 }
 
 struct Prefetch {
@@ -93,6 +95,12 @@ struct Player {
 struct State {
     /// Track and position restored from the last session; used once, on its first play.
     resume: Option<(String, f32)>,
+    /// Output device the player is open on, the system default, and all devices.
+    output_device: Option<String>,
+    default_device: Option<String>,
+    audio_devices: Vec<String>,
+    /// Pause as soon as the song restarts (moving to a new output while paused).
+    pause_after_start: bool,
     /// Page shown on the previous tick, to refresh views when the user arrives on them.
     last_page: i32,
     /// Playlist cover mosaics, keyed by the album art keys they were built from.
@@ -571,6 +579,7 @@ impl State {
             online_lyrics: ui.get_online_lyrics(),
             plex_libraries: self.data.preferences.plex_libraries.clone(),
             plex_address: ui.get_plex_address().trim().to_owned(),
+            audio_device: self.data.preferences.audio_device.clone(),
             font: ui.get_font_index(),
             discord_id: ui.get_discord_id().trim().to_owned(),
             discord_image: ui.get_discord_image().trim().to_owned(),
@@ -1671,6 +1680,12 @@ impl State {
                     self.missing_art.insert(key);
                 }
             }
+            Event::AudioDevices(default, all) => {
+                self.default_device = default;
+                self.audio_devices = all;
+                self.publish_audio_devices(ui);
+                self.follow_output(ui, tx);
+            }
             Event::Lyrics(key, lines) => {
                 self.lyrics_pending.remove(&key);
                 self.lyrics_cache.insert(key.clone(), lines);
@@ -1724,6 +1739,42 @@ impl State {
         }
     }
 
+    fn publish_audio_devices(&self, ui: &Sonic) {
+        let mut names: Vec<slint::SharedString> = vec!["System default".into()];
+        names.extend(self.audio_devices.iter().map(|name| slint::SharedString::from(name.as_str())));
+        let chosen = &self.data.preferences.audio_device;
+        let index = self.audio_devices.iter().position(|name| name == chosen).map_or(0, |i| i + 1);
+        ui.set_audio_devices(ModelRc::new(VecModel::from(names)));
+        ui.set_audio_device_index(index as i32);
+    }
+
+    /// Moves playback to the device it should be on (the chosen one if it's connected,
+    /// otherwise the system default) when that's not where it is now.
+    fn follow_output(&mut self, ui: &Sonic, tx: &Sender<Event>) {
+        let chosen = &self.data.preferences.audio_device;
+        let wanted = if !chosen.is_empty() && self.audio_devices.contains(chosen) {
+            Some(chosen.clone())
+        } else {
+            self.default_device.clone()
+        };
+        if wanted.is_none() || self.player.is_none() || self.output_device == wanted {
+            return;
+        }
+        let Some(player) = self.player.take() else { return };
+        let busy = !player.sink.empty();
+        drop(player);
+        self.output_device = None;
+        if !busy || self.current >= self.queue.len() {
+            return;
+        }
+        // Restart the song on the new device where it was, playing or paused as before.
+        self.resume = Some((self.queue[self.current].rating_key.clone(), ui.get_position()));
+        self.pause_after_start = !ui.get_playing();
+        // Don't count the switch as finishing the song for Last.fm.
+        self.started_at = None;
+        self.start(ui, tx, self.current);
+    }
+
     fn audio_started(&mut self, ui: &Sonic, tx: &Sender<Event>, duration: Option<Duration>) {
         if let Some((key, position)) = self.resume.take()
             && self
@@ -1747,6 +1798,12 @@ impl State {
             "Playing from Plex".into()
         });
         ui.set_playing(true);
+        if std::mem::take(&mut self.pause_after_start) {
+            if let Some(player) = &self.player {
+                player.sink.pause();
+            }
+            ui.set_playing(false);
+        }
         self.publish_queue(ui);
         self.started_at = Some(
             SystemTime::now()
@@ -1798,8 +1855,8 @@ impl State {
 
     fn play(&mut self, audio: Audio) -> Result<()> {
         if self.player.is_none() {
-            let stream = OutputStreamBuilder::open_default_stream()
-                .context("Opening the default audio device")?;
+            let (stream, device) = open_output(&self.data.preferences.audio_device)?;
+            self.output_device = device;
             self.player = Some(Player {
                 sink: Arc::new(Sink::connect_new(stream.mixer())),
                 download: None,
@@ -1818,6 +1875,52 @@ impl State {
         }
         Ok(())
     }
+}
+
+/// Opens the named output device, or the system default when it's empty or gone.
+/// Returns the stream and the name of the device it opened.
+fn open_output(wanted: &str) -> Result<(OutputStream, Option<String>)> {
+    use rodio::cpal::traits::{DeviceTrait, HostTrait};
+    let host = rodio::cpal::default_host();
+    if !wanted.is_empty()
+        && let Some(device) = host
+            .output_devices()
+            .ok()
+            .and_then(|mut devices| devices.find(|device| device.name().ok().as_deref() == Some(wanted)))
+        && let Ok(mut stream) = OutputStreamBuilder::from_device(device).and_then(|b| b.open_stream())
+    {
+        stream.log_on_drop(false);
+        return Ok((stream, Some(wanted.to_owned())));
+    }
+    let name = host.default_output_device().and_then(|device| device.name().ok());
+    let mut stream =
+        OutputStreamBuilder::open_default_stream().context("Opening the default audio device")?;
+    stream.log_on_drop(false);
+    Ok((stream, name))
+}
+
+/// Watches the output devices and reports whenever the default or the list changes.
+fn watch_audio_devices(tx: Sender<Event>) {
+    use rodio::cpal::traits::{DeviceTrait, HostTrait};
+    thread::spawn(move || {
+        let mut last = None;
+        loop {
+            let host = rodio::cpal::default_host();
+            let default = host.default_output_device().and_then(|device| device.name().ok());
+            let all: Vec<String> = host
+                .output_devices()
+                .map(|devices| devices.filter_map(|device| device.name().ok()).collect())
+                .unwrap_or_default();
+            let now = Some((default.clone(), all.clone()));
+            if now != last {
+                last = now;
+                if tx.send(Event::AudioDevices(default, all)).is_err() {
+                    return;
+                }
+            }
+            thread::sleep(Duration::from_secs(2));
+        }
+    });
 }
 
 fn load_audio(plex: Option<Plex>, track: Entry, cancel: Arc<AtomicBool>) -> Result<Audio> {
@@ -2470,6 +2573,10 @@ fn main() -> Result<()> {
     let state = Rc::new(RefCell::new(State {
         last_page: -1,
         resume: None,
+        output_device: None,
+        default_device: None,
+        audio_devices: Vec::new(),
+        pause_after_start: false,
         mosaics: RefCell::new(HashMap::new()),
         theme_fade: ThemeFade::default(),
         lyrics_key: String::new(),
@@ -3674,6 +3781,7 @@ fn main() -> Result<()> {
     });
     {
         let tx = tx.clone();
+        watch_audio_devices(tx.clone());
         thread::spawn(move || match lastfm::Session::restore() {
             Ok(Some(session)) => {
                 let _ = tx.send(Event::FmConnected(0, Ok(session)));
@@ -3708,6 +3816,20 @@ fn main() -> Result<()> {
     });
     let mut last_presence = (String::new(), String::new(), 0, false);
     let _ = plex::set_manual_address(&preferences.plex_address);
+    ui.on_choose_audio_device({
+        let (state, weak, tx) = (state.clone(), ui.as_weak(), tx.clone());
+        move |index| {
+            let Some(ui) = weak.upgrade() else { return };
+            let Ok(mut state) = state.try_borrow_mut() else { return };
+            let name = usize::try_from(index - 1)
+                .ok()
+                .and_then(|i| state.audio_devices.get(i).cloned())
+                .unwrap_or_default();
+            state.data.preferences.audio_device = name;
+            state.save(&ui, "Saved the output device.");
+            state.follow_output(&ui, &tx);
+        }
+    });
     ui.on_apply_plex_address({
         let (state, weak, tx) = (state.clone(), ui.as_weak(), tx.clone());
         move || {

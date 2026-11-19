@@ -240,6 +240,8 @@ export component MobileApp inherits Window {
     in property <[LibraryItem]> libraries;
     in property <string> app-version;
     in property <string> plex-address;
+    // Flipped to force a full redraw when the app comes back on screen.
+    in property <bool> repaint;
 
     in property <string> album-title;
     in property <string> album-artist;
@@ -812,4 +814,7 @@ export component MobileApp inherits Window {
             }
         }
     }
+
+    // Toggling this full-window element makes the renderer redraw every pixel.
+    if root.repaint: Rectangle { x: 0; y: 0; width: root.width; height: root.height; background: #00000001; }
 }
