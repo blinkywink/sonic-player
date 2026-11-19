@@ -126,6 +126,20 @@ fn track(path: &Path) -> Option<(String, Entry)> {
     Some((album_artist, track))
 }
 
+/// ReplayGain values from the file's tags, if it has them.
+pub fn loudness(path: &Path) -> Option<crate::plex::Loudness> {
+    let file = lofty::read_from_path(path).ok()?;
+    let tag = file.primary_tag().or_else(|| file.first_tag())?;
+    let number = |key| tag.get_string(key).and_then(crate::plex::parse_gain);
+    let loudness = crate::plex::Loudness {
+        track_gain: number(ItemKey::ReplayGainTrackGain),
+        track_peak: number(ItemKey::ReplayGainTrackPeak),
+        album_gain: number(ItemKey::ReplayGainAlbumGain),
+        album_peak: number(ItemKey::ReplayGainAlbumPeak),
+    };
+    (loudness.track_gain.is_some() || loudness.album_gain.is_some()).then_some(loudness)
+}
+
 pub fn art(path: &Path) -> Option<Vec<u8>> {
     let file = lofty::read_from_path(path).ok()?;
     let tag = file.primary_tag().or_else(|| file.first_tag())?;

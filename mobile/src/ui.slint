@@ -569,7 +569,7 @@ export component MobileApp inherits Window {
                 Label { text: "Equalizer"; font-size: 16px; height: 22px; }
                 Segmented { options: ["Flat", "Bass", "Treble"]; current: root.eq-preset; chosen(index) => { root.set-eq(index); } }
                 Segmented { options: ["Rock", "Jazz", "Classical"]; current: root.eq-preset - 3; chosen(index) => { root.set-eq(index + 3); } }
-                SwitchRow { label: "Volume leveling"; detail: "Evens out loud and quiet songs."; on: root.normalizer; toggled => { root.toggle-normalizer(); } }
+                SwitchRow { label: "Volume leveling"; detail: "Uses your Plex server's loudness analysis: whole albums at one level, songs evened out on shuffle."; on: root.normalizer; toggled => { root.toggle-normalizer(); } }
                 SwitchRow { label: "Find lyrics online"; detail: "Look up lyrics on LRCLIB when Plex has none."; on: root.online-lyrics; toggled => { root.toggle-online-lyrics(); } }
             }
             Card {

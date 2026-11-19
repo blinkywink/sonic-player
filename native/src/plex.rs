@@ -5,7 +5,8 @@ use reqwest::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
-    sync::{Arc, Mutex, RwLock, mpsc},
+    collections::HashMap,
+    sync::{Arc, LazyLock, Mutex, RwLock, mpsc},
     thread,
     time::{Duration, Instant},
 };
@@ -110,6 +111,46 @@ struct Device {
     #[serde(default)]
     connections: Vec<Connection>,
 }
+
+/// Loudness measured ahead of time (by the Plex server's loudness analysis, or
+/// ReplayGain tags in local files): gains in dB, peaks as linear sample values.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Loudness {
+    pub track_gain: Option<f32>,
+    pub track_peak: Option<f32>,
+    pub album_gain: Option<f32>,
+    pub album_peak: Option<f32>,
+}
+
+impl Loudness {
+    /// The volume to play at: album values when playing an album in order, track
+    /// values otherwise (each falls back to the other), lowered if needed so the
+    /// peak can't clip. 1.0 when nothing was measured.
+    pub fn gain(&self, album: bool) -> f32 {
+        let (gain, peak) = if album {
+            (self.album_gain.or(self.track_gain), self.album_peak.or(self.track_peak))
+        } else {
+            (self.track_gain.or(self.album_gain), self.track_peak.or(self.album_peak))
+        };
+        let Some(gain) = gain else { return 1.0 };
+        let mut linear = 10f32.powf(gain.clamp(-24.0, 12.0) / 20.0);
+        if let Some(peak) = peak.filter(|peak| *peak > 0.0) {
+            linear = linear.min(0.98 / peak);
+        }
+        linear
+    }
+
+    fn found(self) -> Option<Self> {
+        (self.track_gain.is_some() || self.album_gain.is_some()).then_some(self)
+    }
+}
+
+/// A gain like "-7.84", "-7.84 dB" or a JSON number.
+pub(crate) fn parse_gain(text: &str) -> Option<f32> {
+    text.split_whitespace().next()?.trim_end_matches("dB").parse().ok()
+}
+
+static LOUDNESS: LazyLock<Mutex<HashMap<String, Option<Loudness>>>> = LazyLock::new(Default::default);
 
 /// An address typed in Settings (e.g. "203.0.113.7:25565"), tried right after the
 /// home network.
@@ -553,6 +594,46 @@ impl Plex {
             .json::<Envelope<Items>>()?
             .container
             .entries)
+    }
+
+    /// The track's loudness from the server's analysis (cached), if it has been analyzed.
+    pub fn loudness(&self, track: &Entry) -> Option<Loudness> {
+        if let Some(known) = LOUDNESS.lock().ok().and_then(|cache| cache.get(&track.rating_key).copied()) {
+            return known;
+        }
+        let value: serde_json::Value = self
+            .send(&format!("/library/metadata/{}", track.rating_key), |request| {
+                request.timeout(Duration::from_secs(5))
+            })
+            .ok()?
+            .json()
+            .ok()?;
+        let number = |value: &serde_json::Value| {
+            value.as_f64().map(|n| n as f32).or_else(|| parse_gain(value.as_str()?))
+        };
+        let streams = value["MediaContainer"]["Metadata"][0]["Media"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .flat_map(|media| media["Part"].as_array().into_iter().flatten())
+            .flat_map(|part| part["Stream"].as_array().into_iter().flatten());
+        let mut loudness = None;
+        for stream in streams.filter(|stream| stream["streamType"].as_i64() == Some(2)) {
+            loudness = Loudness {
+                track_gain: number(&stream["gain"]),
+                track_peak: number(&stream["peak"]),
+                album_gain: number(&stream["albumGain"]),
+                album_peak: number(&stream["albumPeak"]),
+            }
+            .found();
+            if loudness.is_some() {
+                break;
+            }
+        }
+        if let Ok(mut cache) = LOUDNESS.lock() {
+            cache.insert(track.rating_key.clone(), loudness);
+        }
+        loudness
     }
 
     pub fn track_audio(&self, track: &Entry) -> Result<reqwest::blocking::Response> {

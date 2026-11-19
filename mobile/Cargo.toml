@@ -1,6 +1,6 @@
 [package]
 name = "sonic-mobile"
-version = "0.4.4"
+version = "0.4.5"
 edition = "2024"
 description = "Sonic for iPhone: a lean Plex music player"
 repository = "https://github.com/blinkywink/sonic-player"

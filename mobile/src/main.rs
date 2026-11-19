@@ -94,7 +94,7 @@ enum Event {
     Local(Result<Vec<(Entry, Vec<Entry>)>>),
     Tracks(String, Result<Vec<Entry>>),
     Art(String, Option<Art>),
-    Audio(u64, Result<Decoder<BufReader<Box<dyn AudioInput>>>>),
+    Audio(u64, Result<(Decoder<BufReader<Box<dyn AudioInput>>>, Option<plex::Loudness>)>),
     Lyrics(String, Option<Vec<lyrics::Line>>),
     /// Full-size cover (encoded) for the lock screen, by album key.
     NowArt(String, Vec<u8>),
@@ -254,6 +254,8 @@ struct App {
     fm_sending: bool,
     fm_last_retry: Instant,
     last_tick: Instant,
+    /// Whether the queue was shuffled (leveling then uses track gain).
+    shuffled: bool,
     /// Where the song was at the last tick, and how often it has been resumed after
     /// the stream dropped out (so a flaky connection doesn't skip the song).
     last_position: f32,
@@ -841,7 +843,7 @@ impl App {
                 }
             }
             Event::Audio(generation, result) if generation == self.generation => match result {
-                Ok(decoder) => {
+                Ok((decoder, loudness)) => {
                     if self.stream.is_none() {
                         match OutputStreamBuilder::open_default_stream() {
                             Ok(mut stream) => {
@@ -861,7 +863,13 @@ impl App {
                         if std::env::var_os("SONIC_MUTE").is_some() {
                             sink.set_volume(0.0);
                         }
-                        sink.append(eq::Equalizer::new(decoder, self.equalizer.clone()));
+                        // Album leveling when playing an album in order, track leveling otherwise.
+                        let album = !self.shuffled
+                            && self.queue.iter().all(|t| {
+                                self.queue.first().is_some_and(|first| t.parent_rating_key == first.parent_rating_key)
+                            });
+                        let level = loudness.map_or(1.0, |l| l.gain(album));
+                        sink.append(eq::Equalizer::new(decoder, self.equalizer.clone()).with_level(level));
                         if let Some(at) = self.resume_at.take() {
                             let _ = sink.try_seek(Duration::from_secs_f32(at));
                         }
@@ -1038,7 +1046,16 @@ fn plex_cover_bytes(plex: &Plex, thumb: &str, size: u32) -> Option<Vec<u8>> {
     Some(data)
 }
 
-fn open_audio(plex: Option<Plex>, track: &Entry) -> Result<Decoder<BufReader<Box<dyn AudioInput>>>> {
+/// Opens a song's audio and its loudness (measured ahead of time by Plex or tags).
+fn open_audio(
+    plex: Option<Plex>,
+    track: &Entry,
+) -> Result<(Decoder<BufReader<Box<dyn AudioInput>>>, Option<plex::Loudness>)> {
+    let loudness = match &track.local_path {
+        #[cfg(not(target_os = "ios"))]
+        Some(path) => local::loudness(path),
+        _ => plex.as_ref().and_then(|plex| plex.loudness(track)),
+    };
     let (input, length): (Box<dyn AudioInput>, Option<u64>) = if let Some(path) = &track.local_path {
         let file = std::fs::File::open(path).context("Opening local file")?;
         let length = file.metadata()?.len();
@@ -1053,7 +1070,7 @@ fn open_audio(plex: Option<Plex>, track: &Entry) -> Result<Decoder<BufReader<Box
     if let Some(length) = length {
         decoder = decoder.with_byte_len(length);
     }
-    decoder.build().context("Decoding audio")
+    Ok((decoder.build().context("Decoding audio")?, loudness))
 }
 
 fn main() -> Result<()> {
@@ -1101,6 +1118,7 @@ fn main() -> Result<()> {
         fm_sending: false,
         fm_last_retry: Instant::now(),
         last_tick: Instant::now(),
+        shuffled: false,
         last_position: 0.0,
         resumes: 0,
         resume_at: None,
@@ -1147,10 +1165,12 @@ fn main() -> Result<()> {
         if shuffle {
             fastrand::shuffle(&mut tracks);
         }
+        app.shuffled = shuffle;
         app.play_list(&ui, tracks, 0);
     });
     on!(on_play_track, |app, ui, index| {
         let tracks = app.tracks.get(&app.open_album).cloned().unwrap_or_default();
+        app.shuffled = false;
         app.play_list(&ui, tracks, index.max(0) as usize);
     });
     on!(on_play_queue, |app, ui, row| {

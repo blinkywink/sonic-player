@@ -46,6 +46,16 @@ impl<T: Read + Seek + Send + Sync> AudioInput for T {}
 struct Audio {
     decoder: Decoder<std::io::BufReader<Box<dyn AudioInput>>>,
     download: Option<stream::DownloadStatus>,
+    /// Measured ahead of time, so leveling is right from the first note.
+    loudness: Option<plex::Loudness>,
+}
+
+/// Album leveling when the queue is one album in order; track leveling otherwise.
+fn album_mode(queue: &[Entry], shuffled: bool) -> bool {
+    !shuffled
+        && queue
+            .first()
+            .is_some_and(|first| queue.iter().all(|track| track.parent_rating_key == first.parent_rating_key))
 }
 
 enum Event {
@@ -1324,6 +1334,7 @@ impl State {
         {
             let mut prefetch = self.prefetch.take().unwrap();
             let audio = prefetch.audio.take().unwrap();
+            let level = audio.loudness.map_or(1.0, |l| l.gain(album_mode(&self.queue, self.shuffled)));
             let started = Arc::new(AtomicBool::new(false));
             self.handoff = Some(Handoff {
                 track,
@@ -1334,7 +1345,7 @@ impl State {
                 skip_requested: false,
             });
             player.sink.append(stream::NextSource {
-                source: eq::Equalizer::new(audio.decoder, self.equalizer.clone()),
+                source: eq::Equalizer::new(audio.decoder, self.equalizer.clone()).with_level(level),
                 started,
                 cancelled: prefetch.cancel,
                 previous: player.download.clone(),
@@ -1863,6 +1874,7 @@ impl State {
                 _stream: stream,
             });
         }
+        let level = audio.loudness.map_or(1.0, |l| l.gain(album_mode(&self.queue, self.shuffled)));
         if let Some(player) = &mut self.player {
             player.download = audio.download;
             player
@@ -1870,7 +1882,7 @@ impl State {
                 .set_volume(if self.muted { 0.0 } else { self.volume });
             player
                 .sink
-                .append(eq::Equalizer::new(audio.decoder, self.equalizer.clone()));
+                .append(eq::Equalizer::new(audio.decoder, self.equalizer.clone()).with_level(level));
             player.sink.play();
         }
         Ok(())
@@ -1924,6 +1936,10 @@ fn watch_audio_devices(tx: Sender<Event>) {
 }
 
 fn load_audio(plex: Option<Plex>, track: Entry, cancel: Arc<AtomicBool>) -> Result<Audio> {
+    let loudness = match &track.local_path {
+        Some(path) => local::loudness(path),
+        None => plex.as_ref().and_then(|plex| plex.loudness(&track)),
+    };
     let (input, length, download): (Box<dyn AudioInput>, _, _) =
         if let Some(path) = &track.local_path {
             let file = File::open(path).context("Opening local file")?;
@@ -1945,6 +1961,7 @@ fn load_audio(plex: Option<Plex>, track: Entry, cancel: Arc<AtomicBool>) -> Resu
     Ok(Audio {
         decoder: decoder.build().context("Decoding audio")?,
         download,
+        loudness,
     })
 }
 

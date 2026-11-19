@@ -1603,7 +1603,7 @@ export component Sonic inherits Window {
                             }
                             Label { text: "Loudness normalizer"; height: 22px; }
                         }
-                        HorizontalLayout { padding-left: 28px; Text { text: "Plays every song at a similar volume, without squashing the loud and quiet parts within a song."; wrap: word-wrap; color: Palette.muted; font-size: 12px; vertical-stretch: 0; horizontal-stretch: 1; } }
+                        HorizontalLayout { padding-left: 28px; Text { text: "Uses your Plex server's loudness analysis (or ReplayGain tags) before each song starts: albums play at one level, as mastered, and songs are evened out on shuffle or mixed queues."; wrap: word-wrap; color: Palette.muted; font-size: 12px; vertical-stretch: 0; horizontal-stretch: 1; } }
                         Rectangle { height: 22px; HorizontalLayout {
                             spacing: 10px; alignment: start;
                             accessible-role: checkbox; accessible-label: "Find lyrics online";
