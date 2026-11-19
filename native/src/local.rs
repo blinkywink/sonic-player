@@ -26,6 +26,22 @@ pub fn scan() -> Result<Vec<(Entry, Vec<Entry>)>> {
     scan_folder(root)
 }
 
+/// Scans several music folders (the default SonicMusic folder is created if it's
+/// one of them; other folders that don't exist right now are skipped).
+pub fn scan_folders(roots: &[PathBuf]) -> Result<Vec<(Entry, Vec<Entry>)>> {
+    let default = folder().ok();
+    let mut albums = Vec::new();
+    for root in roots {
+        if default.as_ref() == Some(root) {
+            fs::create_dir_all(root)?;
+        }
+        if root.is_dir() {
+            albums.extend(scan_folder(root.clone())?);
+        }
+    }
+    Ok(albums)
+}
+
 fn scan_folder(root: PathBuf) -> Result<Vec<(Entry, Vec<Entry>)>> {
     let mut groups: BTreeMap<(String, String), Vec<Entry>> = BTreeMap::new();
     let mut folders = vec![root];

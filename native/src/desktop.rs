@@ -313,6 +313,48 @@ fn ico_image(file: &[u8], target: i32) -> Option<&[u8]> {
     file.get(offset..offset.checked_add(size)?)
 }
 
+/// Opens the Windows folder picker over Sonic.
+pub fn pick_folder(ui: &crate::Sonic) -> Option<std::path::PathBuf> {
+    use windows_sys::Win32::{
+        System::Com::CoTaskMemFree,
+        UI::Shell::{
+            BIF_NEWDIALOGSTYLE, BIF_RETURNONLYFSDIRS, BROWSEINFOW, SHBrowseForFolderW,
+            SHGetPathFromIDListW,
+        },
+    };
+    let owner = ui
+        .window()
+        .window_handle()
+        .window_handle()
+        .ok()
+        .and_then(|handle| match handle.as_raw() {
+            RawWindowHandle::Win32(handle) => Some(handle.hwnd.get() as HWND),
+            _ => None,
+        })
+        .unwrap_or(null_mut());
+    let mut name = [0u16; 260];
+    let title: Vec<u16> = "Choose a folder with music".encode_utf16().chain([0]).collect();
+    let info = BROWSEINFOW {
+        hwndOwner: owner,
+        pszDisplayName: name.as_mut_ptr(),
+        lpszTitle: title.as_ptr(),
+        ulFlags: BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE,
+        ..Default::default()
+    };
+    let list = unsafe { SHBrowseForFolderW(&info) };
+    if list.is_null() {
+        return None;
+    }
+    let mut path = [0u16; 1024];
+    let ok = unsafe { SHGetPathFromIDListW(list, path.as_mut_ptr()) };
+    unsafe { CoTaskMemFree(list as *const _) };
+    if ok == 0 {
+        return None;
+    }
+    let len = path.iter().position(|&c| c == 0).unwrap_or(path.len());
+    Some(std::path::PathBuf::from(String::from_utf16_lossy(&path[..len])))
+}
+
 /// Opens the Windows color dialog over Sonic, like the original's color input.
 pub fn pick_color(ui: &crate::Sonic, initial: [u8; 3]) -> Option<[u8; 3]> {
     use windows_sys::Win32::UI::Controls::Dialogs::{

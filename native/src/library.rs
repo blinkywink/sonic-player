@@ -44,6 +44,8 @@ pub struct Preferences {
     pub plex_address: String,
     /// Output device by name; empty follows the system default.
     pub audio_device: String,
+    /// Folders local files are loaded from; empty uses Music\SonicMusic.
+    pub local_folders: Vec<String>,
 }
 
 impl Default for Preferences {
@@ -74,6 +76,7 @@ impl Default for Preferences {
             plex_libraries: Vec::new(),
             plex_address: String::new(),
             audio_device: String::new(),
+            local_folders: Vec::new(),
         }
     }
 }

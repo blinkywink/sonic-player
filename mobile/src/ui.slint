@@ -290,6 +290,7 @@ export component MobileApp inherits Window {
     callback sign-out;
     callback toggle-library(int);
     callback apply-plex-address(string);
+    callback refresh-library;
     callback set-columns(int);
     callback set-eq(int);
     callback toggle-normalizer;
@@ -322,6 +323,11 @@ export component MobileApp inherits Window {
     library := Rectangle {
         y: 0; height: parent.height - root.content-bottom;
         visible: root.screen == 0 || (root.screen == 1 && root.back-drag > 0px);
+        // Pull down past the top of the albums to refresh everything from Plex.
+        property <length> pull: grid.content-y;
+        changed pull => {
+            if self.pull > 70px && !root.connecting && root.signed-in { root.refresh-library(); }
+        }
         // Search
         Rectangle {
             x: 16px; y: root.top-inset + 6px; width: parent.width - 32px; height: 40px;
@@ -375,6 +381,11 @@ export component MobileApp inherits Window {
                     tile-hit := TouchArea { clicked => { search-input.clear-focus(); root.open-album(album.key); } }
                 }
             }
+        }
+        if root.connecting && root.albums.length > 0: Rectangle {
+            x: (parent.width - self.width) / 2; y: root.top-inset + 60px; width: 132px; height: 30px;
+            border-radius: 15px; background: Theme.glass; border-width: 1px; border-color: Theme.hairline;
+            Label { width: parent.width; height: parent.height; text: "Refreshing…"; font-size: 13px; font-weight: 600; horizontal-alignment: center; }
         }
         // Swipe in from the left edge to leave a search.
         if search-input.text != "": TouchArea {

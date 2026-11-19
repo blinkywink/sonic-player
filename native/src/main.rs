@@ -113,6 +113,8 @@ struct State {
     pause_after_start: bool,
     /// What volume leveling applies to the playing song (shown in Settings).
     leveling_note: String,
+    /// The next library load re-fetches every track's loudness (after Refresh).
+    reload_all_loudness: bool,
     /// Page shown on the previous tick, to refresh views when the user arrives on them.
     last_page: i32,
     /// Playlist cover mosaics, keyed by the album art keys they were built from.
@@ -430,13 +432,60 @@ impl State {
         );
     }
 
+    /// The folders local files come from: the chosen ones, or Music\SonicMusic.
+    fn local_roots(&self) -> Vec<PathBuf> {
+        let chosen = &self.data.preferences.local_folders;
+        if chosen.is_empty() {
+            local::folder().into_iter().collect()
+        } else {
+            chosen.iter().map(PathBuf::from).collect()
+        }
+    }
+
+    fn publish_local_folders(&self, ui: &Sonic) {
+        let folders: Vec<slint::SharedString> = self
+            .local_roots()
+            .iter()
+            .map(|path| path.display().to_string().into())
+            .collect();
+        ui.set_local_folders(ModelRc::new(VecModel::from(folders)));
+    }
+
+    /// Adds a folder to load local files from, then rescans.
+    fn add_local_folder(&mut self, ui: &Sonic, tx: &Sender<Event>, path: PathBuf) {
+        if !path.is_dir() {
+            ui.set_local_status(format!("Not a folder: {}", path.display()).into());
+            return;
+        }
+        let mut folders = self.local_roots();
+        if !folders.contains(&path) {
+            folders.push(path);
+        }
+        self.set_local_folders(ui, tx, folders);
+    }
+
+    fn set_local_folders(&mut self, ui: &Sonic, tx: &Sender<Event>, folders: Vec<PathBuf>) {
+        let default = local::folder().ok();
+        self.data.preferences.local_folders = if folders.len() == 1 && default.as_ref() == folders.first() {
+            Vec::new()
+        } else {
+            folders.iter().map(|path| path.display().to_string()).collect()
+        };
+        self.save(ui, "Saved the local music folders.");
+        self.publish_local_folders(ui);
+        if ui.get_local_enabled() {
+            self.scan_local(ui, tx);
+        }
+    }
+
     fn scan_local(&mut self, ui: &Sonic, tx: &Sender<Event>) {
+        let roots = self.local_roots();
         self.local_scan += 1;
         let generation = self.local_scan;
         let tx = tx.clone();
         ui.set_local_status("Scanning music files…".into());
         thread::spawn(move || {
-            let _ = tx.send(Event::LocalLibrary(generation, local::scan()));
+            let _ = tx.send(Event::LocalLibrary(generation, local::scan_folders(&roots)));
         });
     }
 
@@ -592,6 +641,7 @@ impl State {
             plex_libraries: self.data.preferences.plex_libraries.clone(),
             plex_address: ui.get_plex_address().trim().to_owned(),
             audio_device: self.data.preferences.audio_device.clone(),
+            local_folders: self.data.preferences.local_folders.clone(),
             font: ui.get_font_index(),
             discord_id: ui.get_discord_id().trim().to_owned(),
             discord_image: ui.get_discord_image().trim().to_owned(),
@@ -1574,6 +1624,7 @@ impl State {
                 ui.set_connecting(false);
                 match result {
                     Ok((plex, albums)) => {
+                        self.load_loudness(plex.clone());
                         self.apply_plex_connection(ui, plex);
                         self.publish_plex_libraries(ui);
                         self.plex_albums = albums;
@@ -1754,6 +1805,20 @@ impl State {
         }
     }
 
+    /// Fetches loudness in the background: only tracks not saved yet, or all of them
+    /// after Refresh. Saved for the next run.
+    fn load_loudness(&mut self, plex: Plex) {
+        let all = std::mem::take(&mut self.reload_all_loudness);
+        let wanted = self.data.preferences.plex_libraries.clone();
+        thread::spawn(move || {
+            if plex.load_loudness(&wanted, all).is_ok()
+                && let Some(path) = loudness_path()
+            {
+                plex::save_loudness(&path);
+            }
+        });
+    }
+
     fn publish_audio_devices(&self, ui: &Sonic) {
         let mut names: Vec<slint::SharedString> = vec!["System default".into()];
         names.extend(self.audio_devices.iter().map(|name| slint::SharedString::from(name.as_str())));
@@ -1893,6 +1958,11 @@ impl State {
         }
         Ok(())
     }
+}
+
+/// Where track loudness is saved between runs (next to the library data).
+fn loudness_path() -> Option<PathBuf> {
+    Some(library::path()?.with_file_name("loudness.json"))
 }
 
 /// Opens the named output device, or the system default when it's empty or gone.
@@ -2563,6 +2633,9 @@ fn main() -> Result<()> {
     ui.set_normalizer_enabled(preferences.normalizer);
     ui.set_online_lyrics(preferences.online_lyrics);
     ui.set_plex_address(preferences.plex_address.as_str().into());
+    if let Some(path) = loudness_path() {
+        plex::restore_loudness(&path);
+    }
     ui.set_app_version(env!("CARGO_PKG_VERSION").into());
     ui.set_eq_preset_index(preferences.eq_preset.clamp(0, 6));
     ui.set_discord_id(preferences.discord_id.as_str().into());
@@ -2601,6 +2674,7 @@ fn main() -> Result<()> {
         audio_devices: Vec::new(),
         pause_after_start: false,
         leveling_note: String::new(),
+        reload_all_loudness: false,
         mosaics: RefCell::new(HashMap::new()),
         theme_fade: ThemeFade::default(),
         lyrics_key: String::new(),
@@ -2924,9 +2998,54 @@ fn main() -> Result<()> {
             }
         }
     });
-    ui.on_open_local_folder(|| {
-        if let Ok(folder) = local::folder() {
-            let _ = open::that_detached(folder);
+    state.borrow().publish_local_folders(&ui);
+    ui.on_open_local_folder({
+        let state = state.clone();
+        move || {
+            if let Some(folder) = state.borrow().local_roots().into_iter().next() {
+                let _ = open::that_detached(folder);
+            }
+        }
+    });
+    ui.on_add_local_folder({
+        let (state, weak, tx) = (state.clone(), ui.as_weak(), tx.clone());
+        move |path| {
+            let Some(ui) = weak.upgrade() else { return };
+            let path = path.trim().trim_matches('"').to_owned();
+            if path.is_empty() {
+                return;
+            }
+            state.borrow_mut().add_local_folder(&ui, &tx, PathBuf::from(path));
+        }
+    });
+    ui.on_browse_local_folder({
+        let (state, weak, tx) = (state.clone(), ui.as_weak(), tx.clone());
+        move || {
+            let Some(ui) = weak.upgrade() else { return };
+            #[cfg(windows)]
+            if let Some(path) = desktop::pick_folder(&ui) {
+                state.borrow_mut().add_local_folder(&ui, &tx, path);
+            }
+            #[cfg(not(windows))]
+            {
+                let _ = (&state, &tx);
+                ui.set_local_status("Paste the folder path and press Add.".into());
+            }
+        }
+    });
+    ui.on_remove_local_folder({
+        let (state, weak, tx) = (state.clone(), ui.as_weak(), tx.clone());
+        move |index| {
+            let Some(ui) = weak.upgrade() else { return };
+            let mut state = state.borrow_mut();
+            let mut folders = state.local_roots();
+            if let Ok(index) = usize::try_from(index)
+                && index < folders.len()
+            {
+                folders.remove(index);
+            }
+            // Removing the last folder goes back to the default one.
+            state.set_local_folders(&ui, &tx, folders);
         }
     });
     ui.on_refresh_library({
@@ -2934,6 +3053,7 @@ fn main() -> Result<()> {
         move || {
             let Some(ui) = weak.upgrade() else { return };
             let mut state = state.borrow_mut();
+            state.reload_all_loudness = true;
             if ui.get_local_enabled() {
                 state.scan_local(&ui, &tx);
             }

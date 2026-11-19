@@ -114,7 +114,7 @@ struct Device {
 
 /// Loudness measured ahead of time (by the Plex server's loudness analysis, or
 /// ReplayGain tags in local files): gains in dB, peaks as linear sample values.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Deserialize, Serialize)]
 pub struct Loudness {
     pub track_gain: Option<f32>,
     pub track_peak: Option<f32>,
@@ -158,7 +158,55 @@ pub(crate) fn parse_gain(text: &str) -> Option<f32> {
     text.split_whitespace().next()?.trim_end_matches("dB").parse().ok()
 }
 
-static LOUDNESS: LazyLock<Mutex<HashMap<String, Option<Loudness>>>> = LazyLock::new(Default::default);
+/// Loudness by track key, for every analyzed track seen so far (saved between runs).
+static LOUDNESS: LazyLock<Mutex<HashMap<String, Loudness>>> = LazyLock::new(Default::default);
+
+/// Loads loudness saved by an earlier run.
+pub fn restore_loudness(path: &std::path::Path) {
+    let Some(saved) = std::fs::read(path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<HashMap<String, Loudness>>(&bytes).ok())
+    else {
+        return;
+    };
+    if let Ok(mut cache) = LOUDNESS.lock() {
+        cache.extend(saved);
+    }
+}
+
+/// Saves every known track's loudness for the next run.
+pub fn save_loudness(path: &std::path::Path) {
+    let bytes = LOUDNESS.lock().ok().and_then(|cache| serde_json::to_vec(&*cache).ok());
+    if let Some(bytes) = bytes {
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(path, bytes);
+    }
+}
+
+/// A track's loudness from its full metadata (an item of /library/metadata/...).
+fn parse_loudness(item: &serde_json::Value) -> Option<Loudness> {
+    let number = |value: &serde_json::Value| {
+        value.as_f64().map(|n| n as f32).or_else(|| parse_gain(value.as_str()?))
+    };
+    item["Media"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|media| media["Part"].as_array().into_iter().flatten())
+        .flat_map(|part| part["Stream"].as_array().into_iter().flatten())
+        .filter(|stream| stream["streamType"].as_i64() == Some(2))
+        .find_map(|stream| {
+            Loudness {
+                track_gain: number(&stream["gain"]),
+                track_peak: number(&stream["peak"]),
+                album_gain: number(&stream["albumGain"]),
+                album_peak: number(&stream["albumPeak"]),
+            }
+            .found()
+        })
+}
 
 /// The settings line for a song's leveling.
 pub fn leveling_note(loudness: Option<Loudness>, album: bool) -> String {
@@ -612,10 +660,11 @@ impl Plex {
             .entries)
     }
 
-    /// The track's loudness from the server's analysis (cached), if it has been analyzed.
+    /// The track's loudness: saved values first; only a track Plex hadn't analyzed
+    /// when the library was last loaded is asked about (and saved once found).
     pub fn loudness(&self, track: &Entry) -> Option<Loudness> {
         if let Some(known) = LOUDNESS.lock().ok().and_then(|cache| cache.get(&track.rating_key).copied()) {
-            return known;
+            return Some(known);
         }
         let value: serde_json::Value = self
             .send(&format!("/library/metadata/{}", track.rating_key), |request| {
@@ -624,36 +673,62 @@ impl Plex {
             .ok()?
             .json()
             .ok()?;
-        let number = |value: &serde_json::Value| {
-            value.as_f64().map(|n| n as f32).or_else(|| parse_gain(value.as_str()?))
-        };
-        let streams = value["MediaContainer"]["Metadata"][0]["Media"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .flat_map(|media| media["Part"].as_array().into_iter().flatten())
-            .flat_map(|part| part["Stream"].as_array().into_iter().flatten());
-        let mut loudness = None;
-        for stream in streams.filter(|stream| stream["streamType"].as_i64() == Some(2)) {
-            loudness = Loudness {
-                track_gain: number(&stream["gain"]),
-                track_peak: number(&stream["peak"]),
-                album_gain: number(&stream["albumGain"]),
-                album_peak: number(&stream["albumPeak"]),
-            }
-            .found();
-            if loudness.is_some() {
-                break;
-            }
-        }
-        // Only remember what was found: a song Plex hasn't analyzed yet is asked
-        // about again next time (it's usually analyzed minutes after it's added).
-        if loudness.is_some()
-            && let Ok(mut cache) = LOUDNESS.lock()
-        {
+        let loudness = parse_loudness(&value["MediaContainer"]["Metadata"][0])?;
+        if let Ok(mut cache) = LOUDNESS.lock() {
             cache.insert(track.rating_key.clone(), loudness);
         }
-        loudness
+        Some(loudness)
+    }
+
+    /// Loads loudness for the chosen libraries' tracks in a few batched requests:
+    /// every track (`all`), or only those not known yet. Returns how many were found.
+    pub fn load_loudness(&self, wanted: &[String], all: bool) -> Result<usize> {
+        let mut sections = self.chosen_sections(wanted);
+        if sections.is_empty() {
+            sections.push(self.library.clone());
+        }
+        let mut keys = Vec::new();
+        for section in sections {
+            let mut start = 0usize;
+            loop {
+                let first = start.to_string();
+                let page: serde_json::Value = self
+                    .send(&format!("/library/sections/{section}/all"), |request| {
+                        request.query(&[
+                            ("type", "10"),
+                            ("X-Plex-Container-Start", first.as_str()),
+                            ("X-Plex-Container-Size", "1000"),
+                        ])
+                    })?
+                    .json()?;
+                let items = page["MediaContainer"]["Metadata"].as_array().cloned().unwrap_or_default();
+                keys.extend(items.iter().filter_map(|item| item["ratingKey"].as_str().map(str::to_owned)));
+                start += items.len();
+                if items.len() < 1000 {
+                    break;
+                }
+            }
+        }
+        if !all && let Ok(cache) = LOUDNESS.lock() {
+            keys.retain(|key| !cache.contains_key(key));
+        }
+        let mut found = 0;
+        for batch in keys.chunks(100) {
+            let value: serde_json::Value = self
+                .send(&format!("/library/metadata/{}", batch.join(",")), |request| {
+                    request.query(&[("includeLoudnessRamps", "1")]).timeout(Duration::from_secs(30))
+                })?
+                .json()?;
+            let items = value["MediaContainer"]["Metadata"].as_array().cloned().unwrap_or_default();
+            let Ok(mut cache) = LOUDNESS.lock() else { break };
+            for item in &items {
+                if let (Some(key), Some(loudness)) = (item["ratingKey"].as_str(), parse_loudness(item)) {
+                    cache.insert(key.to_owned(), loudness);
+                    found += 1;
+                }
+            }
+        }
+        Ok(found)
     }
 
     pub fn track_audio(&self, track: &Entry) -> Result<reqwest::blocking::Response> {

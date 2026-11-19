@@ -526,6 +526,11 @@ export component Sonic inherits Window {
     in property <[AlbumRow]> album-rows;
     in property <image> selected-art;
     in property <bool> local-enabled;
+    // Folders local files come from.
+    in property <[string]> local-folders;
+    callback add-local-folder(string);
+    callback browse-local-folder;
+    callback remove-local-folder(int);
     in property <string> local-folder;
     in property <string> local-status;
     in property <int> local-count;
@@ -1746,9 +1751,22 @@ export component Sonic inherits Window {
                     }
                     if root.settings-tab == 2: SettingsCard {
                         Label { text: "Local files"; font-size: 16px; font-weight: 700; height: 23px; }
-                        Text { text: "Add music from a folder on your computer. Sonic creates SonicMusic in your Music folder; put MP3, M4A, FLAC, OGG, WAV there, then refresh to load them into your library."; wrap: word-wrap; color: Palette.muted; font-size: 13px; height: 40px; }
+                        Text { text: "Play MP3, M4A, FLAC, OGG and WAV files from folders on your computer. Without any folders chosen, Sonic uses SonicMusic in your Music folder."; wrap: word-wrap; color: Palette.muted; font-size: 13px; height: 40px; }
                         if !root.local-enabled: Action { width: 153px; label: "Enable local files"; clicked => { root.start-local(); } }
-                        if root.local-enabled: Label { text: root.local-folder; height: 24px; color: Palette.muted; }
+                        if root.local-enabled: VerticalLayout {
+                            spacing: 6px;
+                            for folder[index] in root.local-folders: HorizontalLayout {
+                                spacing: 8px; alignment: start;
+                                Label { text: folder; height: 28px; color: Palette.text; font-size: 13px; max-width: 420px; }
+                                Action { width: 76px; height: 28px; font-size: 12px; label: "Remove"; clicked => { root.remove-local-folder(index); } }
+                            }
+                            HorizontalLayout {
+                                spacing: 8px; alignment: start;
+                                folder-input := LineEdit { min-width: 0px; max-width: 300px; horizontal-stretch: 1; placeholder-text: "Paste a folder path, e.g. D:\\Music"; }
+                                Action { width: 64px; label: "Add"; clicked => { root.add-local-folder(folder-input.text); folder-input.text = ""; } }
+                                Action { width: 92px; label: "Browse…"; clicked => { root.browse-local-folder(); } }
+                            }
+                        }
                         if root.local-enabled: HorizontalLayout {
                             alignment: start; spacing: 8px;
                             Action { width: 110px; label: "Open folder"; clicked => { root.open-local-folder(); } }

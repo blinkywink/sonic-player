@@ -210,9 +210,11 @@ fn sort_text(text: &str) -> String {
     lower.strip_prefix("the ").map(str::to_owned).unwrap_or(lower)
 }
 
-/// Artist A–Z, then each artist's albums oldest first.
+/// Artist A–Z, then each artist's albums newest first.
 fn sort_albums(albums: &mut [Entry]) {
-    albums.sort_by_cached_key(|album| (sort_text(&album.parent_title), album.year, sort_text(&album.title)));
+    albums.sort_by_cached_key(|album| {
+        (sort_text(&album.parent_title), std::cmp::Reverse(album.year), sort_text(&album.title))
+    });
 }
 
 struct App {
@@ -256,6 +258,8 @@ struct App {
     last_tick: Instant,
     /// Whether the queue was shuffled (leveling then uses track gain).
     shuffled: bool,
+    /// The next library load re-fetches every track's loudness (pull to refresh).
+    reload_all_loudness: bool,
     /// Where the song was at the last tick, and how often it has been resumed after
     /// the stream dropped out (so a flaky connection doesn't skip the song).
     last_position: f32,
@@ -791,6 +795,16 @@ impl App {
                 ui.set_status(format!("{} albums from Plex.", albums.len()).into());
                 sort_albums(&mut albums);
                 write_json(cache_path("albums.json"), &albums);
+                // Loudness in the background: new tracks only, or everything after a refresh.
+                let (loader, wanted) = (plex.clone(), self.settings.libraries.clone());
+                let all = std::mem::take(&mut self.reload_all_loudness);
+                thread::spawn(move || {
+                    if loader.load_loudness(&wanted, all).is_ok()
+                        && let Some(path) = cache_path("loudness.json")
+                    {
+                        plex::save_loudness(&path);
+                    }
+                });
                 self.plex = Some(plex);
                 self.albums = albums;
                 self.publish_libraries(ui);
@@ -1120,6 +1134,7 @@ fn main() -> Result<()> {
         fm_last_retry: Instant::now(),
         last_tick: Instant::now(),
         shuffled: false,
+        reload_all_loudness: false,
         last_position: 0.0,
         resumes: 0,
         resume_at: None,
@@ -1131,9 +1146,13 @@ fn main() -> Result<()> {
         app.apply_audio_settings();
         ui.set_plex_address(app.settings.server_address.as_str().into());
         let _ = plex::set_manual_address(&app.settings.server_address);
+        if let Some(path) = cache_path("loudness.json") {
+            plex::restore_loudness(&path);
+        }
         // Show the last known library straight away while Plex refreshes it.
         if let Some(albums) = read_json::<Vec<Entry>>(cache_path("albums.json")) {
             app.albums = albums;
+            sort_albums(&mut app.albums);
             app.publish_albums(&ui);
         }
     }
@@ -1266,6 +1285,15 @@ fn main() -> Result<()> {
             };
             let _ = tx.send(event);
         });
+    });
+    // Pull down on the library: reload albums, songs and loudness from Plex.
+    on!(on_refresh_library, |app, ui| {
+        if ui.get_connecting() || app.plex.is_none() {
+            return;
+        }
+        app.reload_all_loudness = true;
+        app.tracks.clear();
+        app.reload_plex(&ui);
     });
     on!(on_set_columns, |app, ui, columns| {
         app.settings.columns = columns.clamp(2, 4) as u32;
