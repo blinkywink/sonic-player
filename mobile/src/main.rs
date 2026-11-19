@@ -1344,6 +1344,10 @@ fn main() -> Result<()> {
             let _ = tx.send(event);
         });
     });
+    on!(on_open_playing_album, |app, ui| {
+        let Some(key) = app.queue.get(app.current).map(|track| track.parent_rating_key.clone()) else { return };
+        app.open_album(&ui, &key);
+    });
     // Pull down on the library: reload albums, songs and loudness from Plex.
     on!(on_refresh_library, |app, ui| {
         if ui.get_connecting() || app.plex.is_none() {

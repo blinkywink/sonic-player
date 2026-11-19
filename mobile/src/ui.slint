@@ -291,6 +291,8 @@ export component MobileApp inherits Window {
     callback toggle-library(int);
     callback apply-plex-address(string);
     callback refresh-library;
+    // Open the playing song's album.
+    callback open-playing-album;
     callback set-columns(int);
     callback set-eq(int);
     callback toggle-normalizer;
@@ -777,7 +779,18 @@ export component MobileApp inherits Window {
             }
             Rectangle { vertical-stretch: 1; min-height: 20px; }
             Label { text: root.now-title; font-size: 24px; font-weight: 800; height: 32px; }
-            Label { text: root.now-album == "" ? root.now-artist : root.now-artist + " — " + root.now-album; font-size: 17px; color: Theme.muted; height: 24px; }
+            // Tap the artist and album to go to that album.
+            Rectangle {
+                height: 24px;
+                Label {
+                    width: parent.width; height: parent.height;
+                    text: root.now-album == "" ? root.now-artist : root.now-artist + " — " + root.now-album;
+                    font-size: 17px; color: album-hit.pressed ? Theme.text : Theme.muted;
+                }
+                accessible-role: button; accessible-label: "Go to album";
+                accessible-action-default => { root.player-open = false; root.open-playing-album(); }
+                album-hit := TouchArea { clicked => { root.player-open = false; root.open-playing-album(); } }
+            }
             Rectangle { height: 22px; }
             // Scrubber: drag to choose a spot, let go to jump there.
             scrubber := Rectangle {
