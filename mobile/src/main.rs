@@ -405,11 +405,35 @@ impl App {
     fn request_art(&mut self, first_row: usize, rows: usize) {
         let wanted: Vec<usize> = self.rows.iter().skip(first_row).take(rows).flatten().copied().collect();
         for index in wanted {
-            if self.pending_art.len() >= 6 {
+            let Some(album) = self.albums.get(index).cloned() else { continue };
+            // Covers saved on disk load right away; only downloads are limited.
+            let saved = cover_file(&album.rating_key).is_some_and(|file| file.is_file());
+            if !saved && self.pending_art.len() >= 6 {
+                continue;
+            }
+            if self.pending_art.len() >= 24 {
                 break;
             }
-            if let Some(album) = self.albums.get(index).cloned() {
-                self.fetch_art(&album);
+            self.fetch_art(&album);
+        }
+    }
+
+    /// Decodes the first screenful of saved covers before the library shows, so
+    /// reopening the app doesn't flash empty tiles.
+    fn load_saved_art(&mut self, ui: &MobileApp, count: usize) {
+        let size = cover_px(self.settings.columns);
+        let first: Vec<usize> = self.rows.iter().flatten().copied().take(count).collect();
+        for index in first {
+            let Some(album) = self.albums.get(index) else { continue };
+            let key = album.rating_key.clone();
+            if self.art.contains_key(&key) {
+                continue;
+            }
+            if let Some(art) = cover_file(&key)
+                .and_then(|file| std::fs::read(file).ok())
+                .and_then(|bytes| decode(&bytes, size))
+            {
+                self.store_art(ui, key, art);
             }
         }
     }
@@ -1487,6 +1511,8 @@ fn main() -> Result<()> {
             app.albums = albums;
             sort_albums(&mut app.albums);
             app.publish_albums(&ui);
+            let screenful = app.settings.columns.clamp(2, 4) as usize * 6;
+            app.load_saved_art(&ui, screenful);
         }
         // Where you left off: the queue is back, paused, and play resumes at the spot.
         if let Some(session) = read_json::<Session>(data_path("session.json"))

@@ -332,11 +332,6 @@ export component MobileApp inherits Window {
     library := Rectangle {
         y: 0; height: parent.height - root.content-bottom;
         visible: root.screen == 0 || (root.screen == 1 && root.back-drag > 0px);
-        // Pull down past the top of the albums to refresh everything from Plex.
-        property <length> pull: grid.content-y;
-        changed pull => {
-            if self.pull > 70px && !root.connecting && root.signed-in { root.refresh-library(); }
-        }
         // Search
         Rectangle {
             x: 16px; y: root.top-inset + 6px; width: parent.width - 32px; height: 40px;
@@ -591,6 +586,12 @@ export component MobileApp inherits Window {
                 Pill {
                     label: root.connecting ? "Connecting…" : "Save & connect";
                     clicked => { if !root.connecting { root.apply-plex-address(address-field.text); } }
+                }
+                // Reload albums, songs and loudness from Plex (everything is saved
+                // otherwise, and only what changed loads on launch).
+                if root.signed-in: Pill {
+                    label: root.connecting ? "Refreshing…" : "Refresh library";
+                    clicked => { if !root.connecting { root.refresh-library(); } }
                 }
                 Pill {
                     label: root.signed-in ? "Sign out" : root.connecting ? "Connecting…" : "Sign in with Plex";
