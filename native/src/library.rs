@@ -46,6 +46,10 @@ pub struct Preferences {
     pub audio_device: String,
     /// Folders local files are loaded from; empty uses Music\SonicMusic.
     pub local_folders: Vec<String>,
+    /// The album-art theme color of the last song, shown again on the next launch.
+    pub art_theme: Option<[u8; 3]>,
+    /// Closing the window keeps Sonic playing in the tray (Windows); off quits.
+    pub close_to_tray: bool,
 }
 
 impl Default for Preferences {
@@ -77,6 +81,8 @@ impl Default for Preferences {
             plex_address: String::new(),
             audio_device: String::new(),
             local_folders: Vec::new(),
+            art_theme: None,
+            close_to_tray: true,
         }
     }
 }

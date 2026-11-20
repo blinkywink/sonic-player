@@ -656,6 +656,8 @@ impl State {
             plex_address: ui.get_plex_address().trim().to_owned(),
             audio_device: self.data.preferences.audio_device.clone(),
             local_folders: self.data.preferences.local_folders.clone(),
+            art_theme: self.art_theme,
+            close_to_tray: ui.get_close_to_tray(),
             font: ui.get_font_index(),
             discord_id: ui.get_discord_id().trim().to_owned(),
             discord_image: ui.get_discord_image().trim().to_owned(),
@@ -2827,6 +2829,10 @@ fn main() -> Result<()> {
     ui.set_font_index(preferences.font.clamp(0, 5));
     ui.set_normalizer_enabled(preferences.normalizer);
     ui.set_online_lyrics(preferences.online_lyrics);
+    ui.set_close_to_tray(preferences.close_to_tray);
+    ui.set_has_tray(cfg!(windows));
+    #[cfg(windows)]
+    desktop::set_close_to_tray(preferences.close_to_tray);
     ui.set_plex_address(preferences.plex_address.as_str().into());
     if let Some(path) = loudness_path() {
         plex::restore_loudness(&path);
@@ -2893,7 +2899,8 @@ fn main() -> Result<()> {
         eq_gains: preferences.eq_gains.map(|gain| gain.clamp(-12.0, 12.0)),
         eq_preamp: preferences.eq_preamp.clamp(-12.0, 12.0),
         can_save,
-        art_theme: None,
+        // The last song's album theme, until its cover is loaded again.
+        art_theme: preferences.art_theme,
         fm_generation: 0,
         fm_busy: false,
         fm_pending: None,
@@ -4203,6 +4210,17 @@ fn main() -> Result<()> {
     });
     let mut last_presence = (String::new(), String::new(), 0, false);
     let _ = plex::set_manual_address(&preferences.plex_address);
+    ui.on_close_to_tray_toggled({
+        let (state, weak) = (state.clone(), ui.as_weak());
+        move || {
+            let Some(ui) = weak.upgrade() else { return };
+            #[cfg(windows)]
+            desktop::set_close_to_tray(ui.get_close_to_tray());
+            if let Ok(mut state) = state.try_borrow_mut() {
+                state.save(&ui, if ui.get_close_to_tray() { "Closing keeps Sonic in the tray." } else { "Closing quits Sonic." });
+            }
+        }
+    });
     ui.on_choose_audio_device({
         let (state, weak, tx) = (state.clone(), ui.as_weak(), tx.clone());
         move |index| {

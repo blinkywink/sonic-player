@@ -587,6 +587,11 @@ export component Sonic inherits Window {
     in-out property <string> discord-id;
     // Plex address to try away from home, e.g. "203.0.113.7:25565".
     in-out property <string> plex-address;
+    // Closing the window keeps playing in the tray (shown where there's a tray).
+    in-out property <bool> close-to-tray: true;
+    in property <bool> has-tray;
+    callback close-to-tray-toggled;
+    changed close-to-tray => { root.close-to-tray-toggled(); }
     callback apply-plex-address;
     // "System default" followed by the output devices.
     in property <[string]> audio-devices: ["System default"];
@@ -1750,6 +1755,26 @@ export component Sonic inherits Window {
                             ComboBox { width: 196px; height: 32px; model: ["Auto (from theme color)", "Light text", "Dark text"]; current-index <=> root.text-mode; selected => { root.refresh-theme(); } }
                         }
                         HorizontalLayout { padding-left: 102px; Text { text: "Auto uses light text on dark themes and dark text on light themes."; wrap: word-wrap; font-size: 12px; color: Palette.muted; vertical-stretch: 0; horizontal-stretch: 1; } }
+                    }
+                    if root.settings-tab == 1 && root.has-tray: SettingsCard {
+                        Label { text: "Window"; font-weight: 700; font-size: 16px; height: 23px; }
+                        Rectangle { height: 22px; HorizontalLayout {
+                            spacing: 10px; alignment: start;
+                            accessible-role: checkbox; accessible-label: "Keep playing in the tray when the window is closed";
+                            accessible-checked: root.close-to-tray;
+                            accessible-action-default => { root.close-to-tray = !root.close-to-tray; }
+                            Rectangle {
+                                width: 22px;
+                                Rectangle {
+                                    width: 17px; height: 17px; border-radius: 5px; border-width: 1px; border-color: Palette.muted;
+                                    background: root.close-to-tray ? Palette.selected : Palette.glass;
+                                    if root.close-to-tray: Label { text: "✓"; color: Palette.text; horizontal-alignment: center; }
+                                }
+                            }
+                            Label { text: "Keep playing in the tray when the window is closed"; height: 22px; }
+                        }
+                        TouchArea { mouse-cursor: pointer; clicked => { root.close-to-tray = !root.close-to-tray; } } }
+                        HorizontalLayout { padding-left: 32px; Text { text: "Off: closing the window quits Sonic."; wrap: word-wrap; color: Palette.muted; font-size: 12px; horizontal-stretch: 1; } }
                     }
                     if root.settings-tab == 1: SettingsCard {
                         Label { text: "Font"; font-weight: 700; font-size: 16px; height: 23px; }

@@ -16,6 +16,13 @@ use windows_sys::{
 };
 
 const TRAY_MESSAGE: u32 = WM_APP + 1;
+
+/// Whether closing the window hides Sonic to the tray (true) or quits it.
+static CLOSE_TO_TRAY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+pub fn set_close_to_tray(enabled: bool) {
+    CLOSE_TO_TRAY.store(enabled, std::sync::atomic::Ordering::Relaxed);
+}
 const RUN: *const u16 = w!("Software\\Microsoft\\Windows\\CurrentVersion\\Run");
 const APP: *const u16 = w!("SonicNative");
 
@@ -192,7 +199,11 @@ unsafe extern "system" fn window_proc(
 ) -> LRESULT {
     unsafe {
         if message == WM_CLOSE {
-            ShowWindow(hwnd, SW_HIDE);
+            if CLOSE_TO_TRAY.load(std::sync::atomic::Ordering::Relaxed) {
+                ShowWindow(hwnd, SW_HIDE);
+            } else {
+                let _ = slint::quit_event_loop();
+            }
             return 0;
         }
         if message == TRAY_MESSAGE {
