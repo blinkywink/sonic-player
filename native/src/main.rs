@@ -1668,6 +1668,10 @@ impl State {
                         }
                         self.rebuild_library(ui);
                         self.restore_playback(ui);
+                        // The song you were on is ready on disk before you press play.
+                        if let Some(track) = self.queue.get(self.current) {
+                            warm(&self.plex, track);
+                        }
                         ui.set_status(format!("{} albums", self.albums.len()).into());
                     }
                     Err(err) => {

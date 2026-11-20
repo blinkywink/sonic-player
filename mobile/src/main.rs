@@ -312,6 +312,8 @@ struct App {
     start_at: Option<f32>,
     /// Paused by an interruption (a call), to resume afterwards.
     interrupted: bool,
+    /// The song restored from last time, preloaded once Plex connects.
+    restored: Option<Entry>,
 }
 
 impl App {
@@ -983,6 +985,10 @@ impl App {
                     }
                 });
                 self.plex = Some(plex);
+                // Have the restored song on disk before you press play.
+                if let Some(track) = self.restored.take() {
+                    warm(&self.plex, &track);
+                }
                 self.albums = albums;
                 self.publish_libraries(ui);
                 self.publish_albums(ui);
@@ -1270,6 +1276,7 @@ impl App {
         } else if self.last_moved.elapsed() > Duration::from_secs(12) && self.resumes < 3 {
             self.last_moved = Instant::now();
             self.resumes += 1;
+            ui.set_toast("Reconnecting…".into());
             self.restart_output(true);
             return;
         }
@@ -1458,6 +1465,7 @@ fn main() -> Result<()> {
         last_session_save: Instant::now(),
         start_at: None,
         interrupted: false,
+        restored: None,
     }));
     {
         let mut app = app.borrow_mut();
@@ -1495,6 +1503,7 @@ fn main() -> Result<()> {
             if let Some(album) = app.albums.iter().find(|a| a.rating_key == track.parent_rating_key).cloned() {
                 app.fetch_art(&album);
             }
+            app.restored = Some(track);
         }
         // Sonic crashed last time: say so (the details are in crash.log).
         if let Some(log) = cache_path("crash.log") {

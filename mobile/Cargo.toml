@@ -1,6 +1,6 @@
 [package]
 name = "sonic-mobile"
-version = "0.5.1"
+version = "0.5.2"
 edition = "2024"
 description = "Sonic for iPhone: a lean Plex music player"
 repository = "https://github.com/blinkywink/sonic-player"
@@ -10,7 +10,7 @@ repository = "https://github.com/blinkywink/sonic-player"
 # window for testing.
 
 [dependencies]
-slint = { version = "1.19", default-features = false, features = ["std", "backend-winit", "renderer-software", "compat-1-2", "image-default-formats"] }
+slint = { version = "1.19", default-features = false, features = ["std", "backend-winit", "renderer-skia", "renderer-software", "compat-1-2", "image-default-formats"] }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
