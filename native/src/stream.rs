@@ -563,7 +563,7 @@ mod tests {
 
     #[test]
     fn seeking_ahead_jumps_the_download() {
-        let data: Vec<u8> = (0..400_000u32).map(|i| (i % 249) as u8).collect();
+        let data: Vec<u8> = (0..2_000_000u32).map(|i| (i % 249) as u8).collect();
         let length = data.len() as u64;
         // The first connection is very slow; seeking near the end shouldn't wait for it.
         let first = Slow { inner: Cursor::new(data.clone()) };
@@ -574,10 +574,11 @@ mod tests {
         let mut input =
             BufferedDownload::with_options(first, Some(length), Arc::default(), Some(reopen), None).unwrap();
         let started = Instant::now();
-        input.seek(SeekFrom::Start(390_000)).unwrap();
+        // Well past the jump distance, so the download moves there.
+        input.seek(SeekFrom::Start(1_990_000)).unwrap();
         let mut tail = vec![0; 10_000];
         input.read_exact(&mut tail).unwrap();
-        assert_eq!(tail, data[390_000..]);
+        assert_eq!(tail, data[1_990_000..]);
         assert!(started.elapsed() < Duration::from_secs(5));
     }
 
