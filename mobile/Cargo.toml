@@ -1,6 +1,6 @@
 [package]
 name = "sonic-mobile"
-version = "0.5.5"
+version = "0.5.6"
 edition = "2024"
 description = "Sonic for iPhone: a lean Plex music player"
 repository = "https://github.com/blinkywink/sonic-player"
@@ -44,3 +44,9 @@ objc2-foundation = { version = "0.3", default-features = false, features = ["std
 
 [target.'cfg(target_os = "linux")'.dependencies]
 keyring = { version = "3.6", features = ["async-secret-service", "tokio", "crypto-rust"] }
+
+# A smaller app: no symbol table, and the compiler optimizes across the whole
+# program. Smaller downloads, faster launch, and on-device signers handle it.
+[profile.release]
+strip = true
+lto = "thin"
