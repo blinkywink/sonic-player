@@ -102,6 +102,8 @@ enum Event {
     Enqueue(Result<Vec<Entry>>),
     /// Album tracks loaded in bulk (replacing the saved ones after a refresh).
     TracksLoaded(HashMap<String, Vec<Entry>>, bool),
+    /// The next song, opened ahead of time for gapless playback.
+    Next(u64, String, Result<(Decoder<BufReader<Box<dyn AudioInput>>>, Option<plex::Loudness>)>),
     FmRestored(Option<lastfm::Session>),
     FmPending(u64, Result<lastfm::Pending>),
     FmConnected(u64, Result<lastfm::Session>),
@@ -262,6 +264,10 @@ struct App {
     last_tick: Instant,
     /// Whether the queue was shuffled (leveling then uses track gain).
     shuffled: bool,
+    /// The next song being preloaded (key), and whether it's queued in the stream
+    /// right behind the current one; its leveling note for when it starts.
+    next: Option<(String, bool)>,
+    next_note: String,
     /// The next library load re-fetches every track's loudness (pull to refresh).
     reload_all_loudness: bool,
     /// Where the song was at the last tick, and how often it has been resumed after
@@ -593,6 +599,7 @@ impl App {
         }
         self.sink = None;
         self.playing = true;
+        self.next = None;
         self.last_position = 0.0;
         self.resumes = 0;
         self.resume_at = None;
@@ -610,6 +617,42 @@ impl App {
         thread::spawn(move || {
             let _ = tx.send(Event::Audio(generation, open_audio(plex, &track)));
         });
+    }
+
+    /// The queued next song has started playing: update everything for it, keeping
+    /// the stream as it is. If the song before it ended early (a dropout), resume
+    /// that one instead.
+    fn gapless_advance(&mut self, ui: &MobileApp) {
+        let Some((key, _)) = self.next.take() else { return };
+        let length = self.queue.get(self.current).map(|t| t.duration as f32 / 1000.0).unwrap_or(0.0);
+        if self.last_position > 1.0 && self.last_position < length - 4.0 && self.resumes < 3 {
+            self.resumes += 1;
+            self.resume_at = Some(self.last_position);
+            if let Some(sink) = self.sink.take() {
+                sink.stop();
+            }
+            self.reopen_current();
+            return;
+        }
+        if self.queue.get(self.current + 1).is_none_or(|track| track.rating_key != key) {
+            // The queue changed under it; just play what's next now.
+            return self.step(ui, true);
+        }
+        self.current += 1;
+        let Some(track) = self.queue.get(self.current).cloned() else { return };
+        self.last_position = 0.0;
+        self.resumes = 0;
+        ui.set_position(0.0);
+        ui.set_leveling_note(std::mem::take(&mut self.next_note).into());
+        self.publish_now_playing(ui);
+        self.publish_queue(ui);
+        self.publish_tracks(ui);
+        self.fetch_lyrics(ui);
+        self.fetch_now_art();
+        self.start_scrobble(&track);
+        if let Some(album) = self.albums.iter().find(|a| a.rating_key == track.parent_rating_key).cloned() {
+            self.fetch_art(&album);
+        }
     }
 
     /// Opens the current song's audio again (after a dropout), keeping everything else.
@@ -913,11 +956,8 @@ impl App {
                         if std::env::var_os("SONIC_MUTE").is_some() {
                             sink.set_volume(0.0);
                         }
-                        // Album leveling when playing an album in order, track leveling otherwise.
-                        let album = !self.shuffled
-                            && self.queue.iter().all(|t| {
-                                self.queue.first().is_some_and(|first| t.parent_rating_key == first.parent_rating_key)
-                            });
+                        // Album gain when the next or previous song is from the same album.
+                        let album = plex::album_neighbors(&self.queue, self.current);
                         let level = loudness.map_or(1.0, |l| l.gain(album));
                         ui.set_leveling_note(plex::leveling_note(loudness, album).into());
                         sink.append(eq::Equalizer::new(decoder, self.equalizer.clone()).with_level(level));
@@ -942,6 +982,29 @@ impl App {
                 }
             },
             Event::Audio(..) => {}
+            Event::Next(generation, key, result) if generation == self.generation => {
+                let Some((wanted, queued)) = &mut self.next else { return };
+                if *wanted != key || *queued {
+                    return;
+                }
+                match result {
+                    Ok((decoder, loudness)) => {
+                        if let Some(sink) = &self.sink
+                            && !sink.empty()
+                        {
+                            let album = plex::album_neighbors(&self.queue, self.current + 1);
+                            let level = loudness.map_or(1.0, |l| l.gain(album));
+                            // Queued in the same stream: it starts the moment this song ends.
+                            sink.append(eq::Equalizer::new(decoder, self.equalizer.clone()).with_level(level));
+                            *queued = true;
+                            self.next_note = plex::leveling_note(loudness, album);
+                        }
+                    }
+                    // Not reachable right now: it opens normally when this song ends.
+                    Err(_) => {}
+                }
+            }
+            Event::Next(..) => {}
             Event::Enqueue(result) => match result {
                 Ok(tracks) => self.enqueue(ui, tracks),
                 Err(error) => ui.set_toast(format!("Couldn't add: {error}").into()),
@@ -1049,6 +1112,11 @@ impl App {
         }
         self.was_active = active;
         let Some(sink) = &self.sink else { return };
+        // The preloaded next song took over (gapless): move on without restarting.
+        if self.next.as_ref().is_some_and(|(_, queued)| *queued) && sink.len() <= 1 && !sink.empty() {
+            self.gapless_advance(ui);
+            return;
+        }
         if sink.empty() {
             if self.playing {
                 // Ended well before its length: the stream dropped out. Reopen it
@@ -1073,6 +1141,18 @@ impl App {
         let position = sink.get_pos().as_secs_f32();
         self.last_position = position;
         ui.set_position(position);
+        // A minute before the end, open the next song so it plays without a gap.
+        let length = self.queue.get(self.current).map(|t| t.duration as f32 / 1000.0).unwrap_or(0.0);
+        if self.next.is_none() && self.playing && length > 0.0 && position > 1.0 && length - position < 60.0
+            && let Some(next) = self.queue.get(self.current + 1).cloned()
+        {
+            self.next = Some((next.rating_key.clone(), false));
+            let (tx, plex, generation) = (self.tx.clone(), self.plex.clone(), self.generation);
+            thread::spawn(move || {
+                let key = next.rating_key.clone();
+                let _ = tx.send(Event::Next(generation, key, open_audio(plex, &next)));
+            });
+        }
         if ui.get_lyrics_synced() {
             let lines = self.lyrics_cache.get(&self.lyrics_key).cloned().flatten().unwrap_or_default();
             let index = lyrics::current(&lines, position);
@@ -1210,6 +1290,8 @@ fn main() -> Result<()> {
         fm_last_retry: Instant::now(),
         last_tick: Instant::now(),
         shuffled: false,
+        next: None,
+        next_note: String::new(),
         reload_all_loudness: false,
         last_position: 0.0,
         resumes: 0,

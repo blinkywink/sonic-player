@@ -1056,10 +1056,19 @@ export component Sonic inherits Window {
                     VerticalLayout {
                         horizontal-stretch: 1; spacing: 12px;
                         if root.searching: Label { text: "ALBUMS"; font-size: 11px; font-weight: 600; height: 17px; color: Palette.muted; }
-                grid := ListView {
-                    vertical-scrollbar-policy: always-off;
-                    horizontal-stretch: 1;
+                // Hold Shift while scrolling to move through albums 5x faster.
+                fast-scroll := TouchArea {
+                    horizontal-stretch: 1; vertical-stretch: 1;
                     min-width: 0px;
+                    scroll-event(event) => {
+                        if !event.modifiers.shift { return reject; }
+                        // Shift turns the wheel sideways in the list; scroll it down instead.
+                        grid.content-y = clamp(grid.content-y + (event.delta-y != 0px ? event.delta-y : event.delta-x) * 5, min(0px, grid.visible-height - grid.content-height), 0px);
+                        return accept;
+                    }
+                grid := ListView {
+                    width: parent.width; height: parent.height;
+                    vertical-scrollbar-policy: always-off;
                     property <length> gap: 16px;
                     property <int> columns: root.list-mode ? 1 : max(1, floor((self.visible-width + self.gap) / (160px + self.gap)));
                     property <length> cover-size: max(1px, (self.visible-width - (self.columns - 1) * self.gap) / self.columns);
@@ -1126,6 +1135,7 @@ export component Sonic inherits Window {
                         }
                       }
                     }
+                }
                 }
                     }
                 }

@@ -153,6 +153,16 @@ impl Loudness {
     }
 }
 
+/// Whether the song at `index` plays as part of its album (Plexamp's "smart" choice):
+/// album gain when the song next to it in the queue is from the same album, so
+/// tracks that run into each other keep their mastered balance; track gain when it
+/// sits between songs from other albums (shuffle, mixed queues).
+pub fn album_neighbors(queue: &[Entry], index: usize) -> bool {
+    let Some(track) = queue.get(index) else { return false };
+    let same = |other: Option<&Entry>| other.is_some_and(|o| o.parent_rating_key == track.parent_rating_key);
+    same(index.checked_sub(1).and_then(|i| queue.get(i))) || same(queue.get(index + 1))
+}
+
 /// A gain like "-7.84", "-7.84 dB" or a JSON number.
 pub(crate) fn parse_gain(text: &str) -> Option<f32> {
     text.split_whitespace().next()?.trim_end_matches("dB").parse().ok()

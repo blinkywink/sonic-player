@@ -50,13 +50,6 @@ struct Audio {
     loudness: Option<plex::Loudness>,
 }
 
-/// Album leveling when the queue is one album in order; track leveling otherwise.
-fn album_mode(queue: &[Entry], shuffled: bool) -> bool {
-    !shuffled
-        && queue
-            .first()
-            .is_some_and(|first| queue.iter().all(|track| track.parent_rating_key == first.parent_rating_key))
-}
 
 enum Event {
     Library(Result<(Plex, Vec<Entry>)>),
@@ -237,29 +230,41 @@ impl State {
         }
         self.songs.set_vec(songs);
         self.visible = visible;
-        self.visible.sort_by_cached_key(|&index| {
-            let album = &self.albums[index];
-            match self.album_sort {
-                2 | 3 => (
-                    0,
-                    album.parent_title.to_lowercase(),
-                    album.title.to_lowercase(),
-                ),
-                4 | 5 => (
-                    album.year,
-                    album.title.to_lowercase(),
-                    album.parent_title.to_lowercase(),
-                ),
-                _ => (
-                    0,
-                    album.title.to_lowercase(),
-                    album.parent_title.to_lowercase(),
-                ),
+        // Sort keys: artist ignoring a leading "The ", case-insensitive text.
+        let text = |value: &str| {
+            let lower = value.trim().to_lowercase();
+            lower.strip_prefix("the ").map(str::to_owned).unwrap_or(lower)
+        };
+        let keys: HashMap<usize, (String, String, u32)> = self
+            .visible
+            .iter()
+            .map(|&index| {
+                let album = &self.albums[index];
+                (index, (text(&album.parent_title), text(&album.title), album.year))
+            })
+            .collect();
+        let sort = self.album_sort;
+        self.visible.sort_by(|a, b| {
+            let (artist_a, title_a, year_a) = &keys[a];
+            let (artist_b, title_b, year_b) = &keys[b];
+            match sort {
+                // Artist A–Z / Z–A, each artist's newest album first.
+                2 | 3 => {
+                    let artist = if sort == 2 { artist_a.cmp(artist_b) } else { artist_b.cmp(artist_a) };
+                    artist.then(year_b.cmp(year_a)).then(title_a.cmp(title_b))
+                }
+                // Newest / oldest first, then artist and title A–Z.
+                4 | 5 => {
+                    let year = if sort == 4 { year_b.cmp(year_a) } else { year_a.cmp(year_b) };
+                    year.then(artist_a.cmp(artist_b)).then(title_a.cmp(title_b))
+                }
+                // Title A–Z / Z–A, then artist.
+                _ => {
+                    let title = if sort == 1 { title_b.cmp(title_a) } else { title_a.cmp(title_b) };
+                    title.then(artist_a.cmp(artist_b))
+                }
             }
         });
-        if matches!(self.album_sort, 1 | 3 | 4) {
-            self.visible.reverse();
-        }
         match self.album_group {
             1 => self
                 .visible
@@ -1388,7 +1393,8 @@ impl State {
         {
             let mut prefetch = self.prefetch.take().unwrap();
             let audio = prefetch.audio.take().unwrap();
-            let album = album_mode(&self.queue, self.shuffled);
+            let next = self.next_index(true).unwrap_or(self.current);
+            let album = plex::album_neighbors(&self.queue, next);
             let level = audio.loudness.map_or(1.0, |l| l.gain(album));
             self.leveling_note = plex::leveling_note(audio.loudness, album);
             let started = Arc::new(AtomicBool::new(false));
@@ -1459,6 +1465,12 @@ impl State {
             ui.set_playback_error("Connect to Plex to play this track.".into());
             return;
         }
+        // Moving on within the same album keeps its cover (no blank-and-reload).
+        let same_album = handoff.is_some()
+            && self
+                .queue
+                .get(self.current)
+                .is_some_and(|previous| previous.parent_rating_key == track.parent_rating_key);
         self.scrobble(tx);
         self.cancel_audio.store(true, Ordering::Relaxed);
         self.cancel_audio = Arc::new(AtomicBool::new(false));
@@ -1487,16 +1499,22 @@ impl State {
         ui.set_duration(0.0);
         ui.set_elapsed("0:00".into());
         ui.set_total(clock(track.duration / 1000).into());
-        ui.set_status("Loading track…".into());
+        if handoff.is_none() {
+            ui.set_status("Loading track…".into());
+        }
         let cancel = self.cancel_audio.clone();
         let generation = self.generation;
-        ui.set_playing_art(Image::default());
+        if !same_album {
+            ui.set_playing_art(Image::default());
+        }
         let thumb = if track.parent_thumb.is_empty() {
             &track.thumb
         } else {
             &track.parent_thumb
         };
-        if track.local_path.is_some() && !track.thumb.is_empty() {
+        if same_album {
+            // The cover is already showing.
+        } else if track.local_path.is_some() && !track.thumb.is_empty() {
             let (art_tx, path) = (tx.clone(), track.local_path.clone());
             thread::spawn(move || {
                 let art = path
@@ -1992,7 +2010,7 @@ impl State {
                 _stream: stream,
             });
         }
-        let album = album_mode(&self.queue, self.shuffled);
+        let album = plex::album_neighbors(&self.queue, self.current);
         let level = audio.loudness.map_or(1.0, |l| l.gain(album));
         self.leveling_note = plex::leveling_note(audio.loudness, album);
         if let Some(player) = &mut self.player {
