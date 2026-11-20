@@ -121,6 +121,9 @@ jobs:
           mkdir -p "$app"
           cp mobile/target/aarch64-apple-ios/release/sonic-mobile "$app/"
           sed "s/0\.2\.0/$version/" mobile/packaging/Info.plist > "$app/Info.plist"
+          # Each release needs its own build number, or installing it over an older
+          # Sonic looks like the same build (signers and iOS can refuse that).
+          plutil -replace CFBundleVersion -string "${{ github.run_number }}" "$app/Info.plist"
           cp mobile/assets/AppIcon60x60@2x.png mobile/assets/AppIcon60x60@3x.png "$app/"
           printf 'APPL????' > "$app/PkgInfo"
           # Record the SDK it was built with, like Xcode does.
