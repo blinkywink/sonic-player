@@ -5240,7 +5240,7 @@ dependencies = [
 
 [[package]]
 name = "sonic-mobile"
-version = "0.4.12"
+version = "0.4.13"
 dependencies = [
  "anyhow",
  "block2 0.6.2",

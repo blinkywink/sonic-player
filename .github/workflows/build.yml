@@ -44,11 +44,12 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - name: Install system libraries
-        # ALSA for audio, xkbcommon/X11/Wayland for windows, fontconfig for fonts.
+        # ALSA for audio, xkbcommon/X11/Wayland for windows, fontconfig for fonts,
+        # GL/EGL/GBM for the GPU renderer.
         run: |
           sudo apt-get update
           sudo apt-get install -y pkg-config libasound2-dev libxkbcommon-dev libfontconfig1-dev \
-            libwayland-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev
+            libwayland-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev             libgl-dev libegl-dev libgbm-dev
       - name: Update Rust stable
         run: rustup update stable --no-self-update
       - name: Test
