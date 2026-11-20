@@ -1473,7 +1473,9 @@ impl State {
             return;
         }
         // Moving on within the same album keeps its cover (no blank-and-reload).
-        let same_album = handoff.is_some()
+        // Another song from the album already showing keeps its cover: skipping or
+        // playing on within an album doesn't blank and reload it.
+        let same_album = ui.get_playing_art().size().width > 0
             && self
                 .queue
                 .get(self.current)
@@ -1519,7 +1521,9 @@ impl State {
         let cancel = self.cancel_audio.clone();
         let generation = self.generation;
         if !same_album {
-            ui.set_playing_art(Image::default());
+            // Show the album's cover from the library straight away (it's usually
+            // loaded already); the sharper Now Playing copy replaces it when ready.
+            ui.set_playing_art(self.artwork.get(&track.parent_rating_key).cloned().unwrap_or_default());
         }
         let thumb = if track.parent_thumb.is_empty() {
             &track.thumb
