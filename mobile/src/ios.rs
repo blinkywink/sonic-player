@@ -136,6 +136,58 @@ pub fn start_remote_commands() {
     }
 }
 
+/// Pauses for calls and unplugged headphones, and resumes after a call, like the
+/// Music app.
+pub fn watch_audio_session() {
+    let Some(center_class) = class(c"NSNotificationCenter") else { return };
+    unsafe {
+        let center: *mut AnyObject = msg_send![center_class, defaultCenter];
+        if center.is_null() {
+            return;
+        }
+        let interruption = RcBlock::new(|note: *mut AnyObject| {
+            match info_number(note, "AVAudioSessionInterruptionTypeKey") {
+                Some(1) => push(Remote::Interrupted),
+                Some(_) => {
+                    let resume = info_number(note, "AVAudioSessionInterruptionOptionKey").unwrap_or(0) & 1 == 1;
+                    push(Remote::InterruptionEnded(resume));
+                }
+                None => {}
+            }
+        });
+        let name = NSString::from_str("AVAudioSessionInterruptionNotification");
+        let _: *mut AnyObject = msg_send![center, addObserverForName: &*name, object: null_mut::<AnyObject>(), queue: null_mut::<AnyObject>(), usingBlock: &*interruption];
+        let route = RcBlock::new(|note: *mut AnyObject| {
+            // 2 = the old device (headphones, a speaker) went away.
+            if info_number(note, "AVAudioSessionRouteChangeReasonKey") == Some(2) {
+                push(Remote::Unplugged);
+            }
+        });
+        let name = NSString::from_str("AVAudioSessionRouteChangeNotification");
+        let _: *mut AnyObject = msg_send![center, addObserverForName: &*name, object: null_mut::<AnyObject>(), queue: null_mut::<AnyObject>(), usingBlock: &*route];
+    }
+}
+
+/// A number from a notification's userInfo.
+unsafe fn info_number(note: *mut AnyObject, key: &str) -> Option<u64> {
+    if note.is_null() {
+        return None;
+    }
+    unsafe {
+        let info: *mut AnyObject = msg_send![note, userInfo];
+        if info.is_null() {
+            return None;
+        }
+        let key = NSString::from_str(key);
+        let value: *mut AnyObject = msg_send![info, objectForKey: &*key];
+        if value.is_null() {
+            return None;
+        }
+        let number: usize = msg_send![value, unsignedIntegerValue];
+        Some(number as u64)
+    }
+}
+
 fn push(remote: Remote) {
     if let Ok(mut commands) = COMMANDS.lock() {
         commands.push(remote);

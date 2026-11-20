@@ -5,6 +5,9 @@
 
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
+#[allow(dead_code)] // Shared with the desktop app.
+#[path = "../../native/src/cache.rs"]
+mod cache;
 mod credentials;
 #[allow(dead_code)] // Shared with the desktop app, which uses more of it.
 #[path = "../../native/src/eq.rs"]
@@ -16,6 +19,7 @@ mod ios;
 mod ios {
     use crate::{NowPlaying, Remote};
     pub fn start_remote_commands() {}
+    pub fn watch_audio_session() {}
     pub fn take_commands() -> Vec<Remote> {
         Vec::new()
     }
@@ -120,6 +124,20 @@ pub enum Remote {
     Next,
     Previous,
     Seek(f64),
+    /// A call or another app took the audio.
+    Interrupted,
+    /// The interruption ended; resume if iOS says so.
+    InterruptionEnded(bool),
+    /// Headphones or a speaker were disconnected (pause, like the Music app).
+    Unplugged,
+}
+
+/// The queue and position, restored on the next launch.
+#[derive(Deserialize, Serialize)]
+struct Session {
+    queue: Vec<Entry>,
+    current: usize,
+    position: f32,
 }
 
 /// What the system media controls show.
@@ -186,10 +204,17 @@ fn read_json<T: for<'de> Deserialize<'de>>(path: Option<PathBuf>) -> Option<T> {
 
 fn write_bytes(path: Option<PathBuf>, bytes: &[u8]) {
     let Some(path) = path else { return };
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
+    // Never leave a half-written file behind if the app is closed mid-save.
+    let _ = cache::write_atomic(&path, bytes);
+}
+
+/// Cover size for the album grid: smaller tiles need fewer pixels (and memory).
+fn cover_px(columns: u32) -> u32 {
+    match columns {
+        0..=2 => COVER_SIZE,
+        3 => 256,
+        _ => 200,
     }
-    let _ = std::fs::write(path, bytes);
 }
 
 fn write_json<T: Serialize>(path: Option<PathBuf>, value: &T) {
@@ -277,6 +302,16 @@ struct App {
     resume_at: Option<f32>,
     /// Whether the app was on screen at the last tick.
     was_active: bool,
+    /// Stall watchdog: when playback last moved, and where it was.
+    last_moved: Instant,
+    last_seen_position: f32,
+    /// Last keep-alive ping to the server while playing.
+    last_ping: Instant,
+    last_session_save: Instant,
+    /// Where to start the next song that opens (a restored session).
+    start_at: Option<f32>,
+    /// Paused by an interruption (a call), to resume afterwards.
+    interrupted: bool,
 }
 
 impl App {
@@ -388,20 +423,20 @@ impl App {
             return;
         }
         self.pending_art.insert(key.clone());
-        let tx = self.tx.clone();
+        let (tx, size) = (self.tx.clone(), cover_px(self.settings.columns));
         thread::spawn(move || {
             let art = match (path, plex) {
                 #[cfg(not(target_os = "ios"))]
-                (Some(path), _) => local::art(&path).and_then(|data| decode(&data)),
+                (Some(path), _) => local::art(&path).and_then(|data| decode(&data, size)),
                 (_, plex) => {
                     // Covers are kept on disk, so they show instantly next time.
                     let file = cover_file(&key);
                     match file.as_ref().and_then(|file| std::fs::read(file).ok()) {
-                        Some(bytes) => decode(&bytes),
+                        Some(bytes) => decode(&bytes, size),
                         None => match plex {
                             Some(plex) if !thumb.is_empty() => {
                                 plex_cover_bytes(&plex, &thumb, COVER_SIZE).and_then(|bytes| {
-                                    let art = decode(&bytes);
+                                    let art = decode(&bytes, size);
                                     if art.is_some() {
                                         write_bytes(file, &bytes);
                                     }
@@ -461,6 +496,10 @@ impl App {
         if self.tracks.contains_key(key) {
             ui.set_tracks_loading(false);
             self.publish_tracks(ui);
+            // You'll probably play it: have its first song ready.
+            if let Some(first) = self.tracks.get(key).and_then(|tracks| tracks.first()) {
+                warm(&self.plex, first);
+            }
         } else {
             ui.set_tracks(ModelRc::default());
             ui.set_tracks_loading(true);
@@ -613,6 +652,9 @@ impl App {
         if let Some(album) = self.albums.iter().find(|a| a.rating_key == track.parent_rating_key).cloned() {
             self.fetch_art(&album);
         }
+        self.resume_at = self.start_at.take();
+        self.last_moved = Instant::now();
+        self.warm_ahead();
         let (tx, plex, generation) = (self.tx.clone(), self.plex.clone(), self.generation);
         thread::spawn(move || {
             let _ = tx.send(Event::Audio(generation, open_audio(plex, &track)));
@@ -653,6 +695,39 @@ impl App {
         if let Some(album) = self.albums.iter().find(|a| a.rating_key == track.parent_rating_key).cloned() {
             self.fetch_art(&album);
         }
+        self.last_moved = Instant::now();
+        self.warm_ahead();
+    }
+
+    /// Preloads the next two songs into the disk cache so skipping is instant.
+    fn warm_ahead(&self) {
+        for offset in 1..=2 {
+            if let Some(track) = self.queue.get(self.current + offset) {
+                warm(&self.plex, track);
+            }
+        }
+    }
+
+    /// Saves the queue and position for the next launch (in the background).
+    fn save_session(&mut self, position: f32) {
+        self.last_session_save = Instant::now();
+        if self.queue.is_empty() {
+            return;
+        }
+        let session = Session { queue: self.queue.clone(), current: self.current, position };
+        thread::spawn(move || write_json(data_path("session.json"), &session));
+    }
+
+    /// Rebuilds the audio output (after a call ends) and continues the song where it was.
+    fn restart_output(&mut self, play: bool) {
+        if let Some(sink) = self.sink.take() {
+            sink.stop();
+        }
+        self.stream = None;
+        self.next = None;
+        self.playing = play;
+        self.resume_at = Some(self.last_position);
+        self.reopen_current();
     }
 
     /// Opens the current song's audio again (after a dropout), keeping everything else.
@@ -727,6 +802,8 @@ impl App {
             Some(sink) => {
                 sink.pause();
                 self.playing = false;
+                let position = sink.get_pos().as_secs_f32();
+                self.save_session(position);
             }
             None if !self.queue.is_empty() => return self.start_current(ui),
             None => {}
@@ -757,6 +834,27 @@ impl App {
             Remote::Seek(seconds) => {
                 self.seek(seconds as f32);
                 ui.set_position(seconds as f32);
+            }
+            Remote::Interrupted => {
+                if self.playing {
+                    self.interrupted = true;
+                    self.toggle(ui);
+                }
+            }
+            Remote::InterruptionEnded(resume) => {
+                #[cfg(target_os = "ios")]
+                ios::start_audio_session();
+                let play = resume && std::mem::take(&mut self.interrupted);
+                // iOS can stop the audio output during a call; rebuild it.
+                if self.sink.is_some() {
+                    self.restart_output(play);
+                    ui.set_playing(self.playing);
+                }
+            }
+            Remote::Unplugged => {
+                if self.playing {
+                    self.toggle(ui);
+                }
             }
         }
     }
@@ -837,12 +935,13 @@ impl App {
         thread::spawn(move || {
             let mut unsent = Vec::new();
             let mut last_error = None;
-            for scrobble in batch {
-                if let Err(error) = session.scrobble(&scrobble.track, scrobble.started_at) {
+            for chunk in batch.chunks(50) {
+                let items: Vec<(Entry, u64)> = chunk.iter().map(|s| (s.track.clone(), s.started_at)).collect();
+                if let Err(error) = session.scrobble_batch(&items) {
                     let message = error.to_string();
-                    // Last.fm refusing a track (e.g. missing artist) won't change; drop it.
-                    if !message.contains("did not accept") && !message.contains("missing an artist") {
-                        unsent.push(scrobble);
+                    // Last.fm refusing tracks won't change; anything else is retried later.
+                    if !message.contains("did not accept") {
+                        unsent.extend(chunk.iter().cloned());
                     }
                     last_error = Some(message);
                 }
@@ -975,6 +1074,14 @@ impl App {
                         self.publish_system();
                     }
                 }
+                Err(error) if error.to_string().contains("404") => {
+                    // Deleted from Plex since the library was saved: move on.
+                    ui.set_toast("That song isn't on Plex anymore".into());
+                    if let Some(track) = self.queue.get(self.current) {
+                        self.tracks.remove(&track.parent_rating_key);
+                    }
+                    self.step(ui, true);
+                }
                 Err(error) => {
                     ui.set_status(format!("Couldn't play: {error}").into());
                     self.playing = false;
@@ -1027,6 +1134,19 @@ impl App {
                 }
                 ios::set_artwork(&key, &bytes);
                 self.publish_system();
+            }
+            Event::Lyrics(key, lines) if lines.is_some() => {
+                self.lyrics_pending.remove(&key);
+                self.lyrics_cache.insert(key.clone(), lines);
+                let found: HashMap<String, Vec<lyrics::Line>> = self
+                    .lyrics_cache
+                    .iter()
+                    .filter_map(|(key, lines)| Some((key.clone(), lines.clone()?)))
+                    .collect();
+                thread::spawn(move || write_json(cache_path("lyrics.json"), &found));
+                if key == self.lyrics_key {
+                    self.present_lyrics(ui);
+                }
             }
             Event::Lyrics(key, lines) => {
                 self.lyrics_pending.remove(&key);
@@ -1139,8 +1259,32 @@ impl App {
         }
         let Some(sink) = &self.sink else { return };
         let position = sink.get_pos().as_secs_f32();
+        let paused = sink.is_paused();
         self.last_position = position;
         ui.set_position(position);
+        // Stall watchdog: playing but not moving for 12 seconds means the stream is
+        // stuck; reopen it at the same spot.
+        if (position - self.last_seen_position).abs() > 0.05 || paused || !self.playing {
+            self.last_seen_position = position;
+            self.last_moved = Instant::now();
+        } else if self.last_moved.elapsed() > Duration::from_secs(12) && self.resumes < 3 {
+            self.last_moved = Instant::now();
+            self.resumes += 1;
+            self.restart_output(true);
+            return;
+        }
+        // Keep the server connection warm while playing (and notice a dead one early).
+        if self.playing && self.last_ping.elapsed() > Duration::from_secs(30) {
+            self.last_ping = Instant::now();
+            if let Some(plex) = self.plex.clone() {
+                thread::spawn(move || {
+                    plex.ping();
+                });
+            }
+        }
+        if self.playing && self.last_session_save.elapsed() > Duration::from_secs(10) {
+            self.save_session(position);
+        }
         // A minute before the end, open the next song so it plays without a gap.
         let length = self.queue.get(self.current).map(|t| t.duration as f32 / 1000.0).unwrap_or(0.0);
         if self.next.is_none() && self.playing && length > 0.0 && position > 1.0 && length - position < 60.0
@@ -1168,10 +1312,10 @@ fn clock(seconds: u64) -> String {
     format!("{}:{:02}", seconds / 60, seconds % 60)
 }
 
-fn decode(data: &[u8]) -> Option<Art> {
+fn decode(data: &[u8], size: u32) -> Option<Art> {
     let image = image::load_from_memory(data).ok()?;
-    let image = if image.width().max(image.height()) > COVER_SIZE {
-        image.resize(COVER_SIZE, COVER_SIZE, image::imageops::FilterType::Triangle)
+    let image = if image.width().max(image.height()) > size {
+        image.resize(size, size, image::imageops::FilterType::Triangle)
     } else {
         image
     };
@@ -1196,7 +1340,8 @@ fn plex_cover_bytes(plex: &Plex, thumb: &str, size: u32) -> Option<Vec<u8>> {
     Some(data)
 }
 
-/// Opens a song's audio and its loudness (measured ahead of time by Plex or tags).
+/// Opens a song's audio and its loudness (measured ahead of time by Plex or tags):
+/// from the disk cache when it's there, otherwise streamed with reconnecting.
 fn open_audio(
     plex: Option<Plex>,
     track: &Entry,
@@ -1206,21 +1351,27 @@ fn open_audio(
         Some(path) => local::loudness(path),
         _ => plex.as_ref().and_then(|plex| plex.loudness(track)),
     };
-    let (input, length): (Box<dyn AudioInput>, Option<u64>) = if let Some(path) = &track.local_path {
-        let file = std::fs::File::open(path).context("Opening local file")?;
-        let length = file.metadata()?.len();
-        (Box::new(file), Some(length))
-    } else {
-        let response = plex.context("Plex is disconnected")?.track_audio(track)?;
-        let length = response.content_length();
-        let input = stream::BufferedDownload::new(response, length, Arc::new(AtomicBool::new(false)))?;
-        (Box::new(input), length)
-    };
+    let (input, length, _) = stream::open_track(plex, track, Arc::new(AtomicBool::new(false)))?;
+    let input: Box<dyn AudioInput> = Box::new(input);
     let mut decoder = Decoder::builder().with_data(BufReader::new(input)).with_seekable(true);
     if let Some(length) = length {
         decoder = decoder.with_byte_len(length);
     }
     Ok((decoder.build().context("Decoding audio")?, loudness))
+}
+
+/// Preloads a song into the disk cache in the background.
+fn warm(plex: &Option<Plex>, track: &Entry) {
+    if track.local_path.is_some() {
+        return;
+    }
+    let Some(plex) = plex.clone() else { return };
+    let track = track.clone();
+    cache::warm(track.rating_key.clone(), move || {
+        let response = plex.track_audio(&track)?;
+        let length = response.content_length();
+        Ok((response, length))
+    });
 }
 
 /// Writes panics to Caches/Sonic/crash.log, to find what went wrong.
@@ -1245,6 +1396,10 @@ fn log_panics() {
 
 fn main() -> Result<()> {
     log_panics();
+    // Songs played or preloaded are kept here (up to 2 GB; iOS may clear it).
+    if let Some(dir) = cache_path("audio") {
+        cache::init(dir, 2 * 1024 * 1024 * 1024);
+    }
     #[cfg(target_os = "ios")]
     ios::start_audio_session();
 
@@ -1297,6 +1452,12 @@ fn main() -> Result<()> {
         resumes: 0,
         resume_at: None,
         was_active: true,
+        last_moved: Instant::now(),
+        last_seen_position: 0.0,
+        last_ping: Instant::now(),
+        last_session_save: Instant::now(),
+        start_at: None,
+        interrupted: false,
     }));
     {
         let mut app = app.borrow_mut();
@@ -1305,7 +1466,10 @@ fn main() -> Result<()> {
         ui.set_plex_address(app.settings.server_address.as_str().into());
         let _ = plex::set_manual_address(&app.settings.server_address);
         if let Some(path) = cache_path("loudness.json") {
-            plex::restore_loudness(&path);
+            thread::spawn(move || plex::restore_loudness(&path));
+        }
+        if let Some(saved) = read_json::<HashMap<String, Vec<lyrics::Line>>>(cache_path("lyrics.json")) {
+            app.lyrics_cache.extend(saved.into_iter().map(|(key, lines)| (key, Some(lines))));
         }
         if let Some(tracks) = read_json::<HashMap<String, Vec<Entry>>>(cache_path("tracks.json")) {
             app.tracks = tracks;
@@ -1315,6 +1479,32 @@ fn main() -> Result<()> {
             app.albums = albums;
             sort_albums(&mut app.albums);
             app.publish_albums(&ui);
+        }
+        // Where you left off: the queue is back, paused, and play resumes at the spot.
+        if let Some(session) = read_json::<Session>(data_path("session.json"))
+            && session.current < session.queue.len()
+        {
+            app.queue = session.queue;
+            app.current = session.current;
+            app.start_at = Some(session.position);
+            app.playing = false;
+            app.publish_now_playing(&ui);
+            app.publish_queue(&ui);
+            ui.set_position(session.position);
+            let track = app.queue[app.current].clone();
+            if let Some(album) = app.albums.iter().find(|a| a.rating_key == track.parent_rating_key).cloned() {
+                app.fetch_art(&album);
+            }
+        }
+        // Sonic crashed last time: say so (the details are in crash.log).
+        if let Some(log) = cache_path("crash.log") {
+            let size = std::fs::metadata(&log).map(|m| m.len()).unwrap_or(0);
+            let seen = log.with_extension("seen");
+            let reported: u64 = std::fs::read_to_string(&seen).ok().and_then(|t| t.trim().parse().ok()).unwrap_or(0);
+            if size > reported {
+                ui.set_toast("Sonic closed unexpectedly last time. Sorry!".into());
+                let _ = std::fs::write(&seen, size.to_string());
+            }
         }
     }
 
@@ -1482,6 +1672,11 @@ fn main() -> Result<()> {
     on!(on_set_columns, |app, ui, columns| {
         app.settings.columns = columns.clamp(2, 4) as u32;
         app.save_settings();
+        // Covers are decoded at a size for the column count; reload them.
+        app.art.clear();
+        app.art_order.clear();
+        app.pending_art.clear();
+        app.publish_albums(&ui);
         app.publish_rows(&ui);
     });
     on!(on_set_eq, |app, ui, preset| {
@@ -1537,7 +1732,23 @@ fn main() -> Result<()> {
         thread::spawn(move || {
             let tx = plex_tx;
             let event = match Plex::restore() {
-                Ok(Some(plex)) => Event::Library(plex.albums(&wanted).map(|albums| (plex, albums))),
+                Ok(Some(plex)) => {
+                    let stamp = plex.library_stamp(&wanted);
+                    let saved = std::fs::read_to_string(cache_path("library-stamp").unwrap_or_default()).ok();
+                    let cached = read_json::<Vec<Entry>>(cache_path("albums.json"));
+                    match (stamp, cached) {
+                        (Some(stamp), Some(albums)) if saved.as_deref() == Some(stamp.as_str()) => {
+                            Event::Library(Ok((plex, albums)))
+                        }
+                        (stamp, _) => {
+                            let result = plex.albums(&wanted);
+                            if let (Ok(_), Some(stamp)) = (&result, stamp) {
+                                write_bytes(cache_path("library-stamp"), stamp.as_bytes());
+                            }
+                            Event::Library(result.map(|albums| (plex, albums)))
+                        }
+                    }
+                }
                 Ok(None) => Event::NoPlex,
                 Err(error) => Event::Library(Err(error)),
             };
@@ -1560,6 +1771,7 @@ fn main() -> Result<()> {
                 // The app object exists once the event loop runs.
                 started = true;
                 ios::start_remote_commands();
+                ios::watch_audio_session();
             }
             ios::open_pending();
             for command in ios::take_commands() {

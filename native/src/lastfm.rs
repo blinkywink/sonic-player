@@ -195,6 +195,27 @@ impl Session {
         self.send_track(track, Some(started_at))
     }
 
+    /// Sends up to 50 scrobbles in one request (Last.fm's limit per call).
+    pub fn scrobble_batch(&self, scrobbles: &[(Entry, u64)]) -> Result<()> {
+        let mut owned: Vec<(String, String)> = vec![("sk".into(), self.session_key.clone())];
+        for (index, (track, started_at)) in scrobbles.iter().take(50).enumerate() {
+            if track.grandparent_title.trim().is_empty() {
+                continue;
+            }
+            owned.push((format!("artist[{index}]"), track.grandparent_title.clone()));
+            owned.push((format!("track[{index}]"), track.title.clone()));
+            owned.push((format!("album[{index}]"), track.parent_title.clone()));
+            owned.push((format!("duration[{index}]"), (track.duration / 1000).to_string()));
+            owned.push((format!("timestamp[{index}]"), started_at.to_string()));
+        }
+        if owned.len() == 1 {
+            return Ok(());
+        }
+        let params = owned.iter().map(|(key, value)| (key.as_str(), value.as_str()));
+        self.client.call("track.scrobble", params, true)?;
+        Ok(())
+    }
+
     fn send_track(&self, track: &Entry, started_at: Option<u64>) -> Result<()> {
         if track.grandparent_title.trim().is_empty() {
             bail!("This track is missing an artist")

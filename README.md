@@ -40,6 +40,12 @@ Download `sonic-ios-unsigned.ipa` from the [latest release](https://github.com/b
 
 To try the phone UI on a desktop: `cargo run --release --manifest-path mobile/Cargo.toml` (it opens a phone-sized window and shows your local music folder when you're not signed in).
 
+## Seamless playback
+
+- Songs you play (and the next ones, preloaded) are kept on disk: up to 5 GB on desktop and 2 GB on iPhone, oldest removed first. Replays, going back and reopening albums start instantly, even offline.
+- A dropped connection (switching from Wi-Fi to cellular, a tunnel) resumes the download from the same byte, finding a new server address if needed; seeking into a part that isn't downloaded yet jumps the download there.
+- The next song is ready before the current one ends, so albums play gapless; the album list, tracks, loudness and lyrics are saved and only refreshed when something changed (or you refresh).
+
 ## Away from home
 
 Sonic tries all of your Plex server's addresses at once and uses the best one that answers: your home network, then a direct remote connection, then Plex's relay. If the network changes (say you leave home), it finds a new address on its own. For fast remote playback, turn on **Remote Access** in your Plex server's settings and, if you forwarded a custom port, enter it there as the manual public port; otherwise Sonic falls back to Plex's slower relay.

@@ -188,10 +188,7 @@ pub fn restore_loudness(path: &std::path::Path) {
 pub fn save_loudness(path: &std::path::Path) {
     let bytes = LOUDNESS.lock().ok().and_then(|cache| serde_json::to_vec(&*cache).ok());
     if let Some(bytes) = bytes {
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        let _ = std::fs::write(path, bytes);
+        let _ = crate::cache::write_atomic(path, &bytes);
     }
 }
 
@@ -288,6 +285,11 @@ struct Section {
     title: String,
     #[serde(rename = "type")]
     kind: String,
+    /// When the library's content last changed (to skip reloading unchanged ones).
+    #[serde(default, rename = "contentChangedAt")]
+    changed_at: u64,
+    #[serde(default, rename = "updatedAt")]
+    updated_at: u64,
 }
 
 #[derive(Deserialize)]
@@ -307,6 +309,46 @@ fn headers(request: RequestBuilder, id: &str) -> RequestBuilder {
 struct Account {
     token: String,
     client_id: String,
+    /// The server address that worked last, tried first next time (no plex.tv
+    /// round trip, so the library is up sooner).
+    #[serde(default)]
+    server: Option<SavedServer>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+struct SavedServer {
+    url: Url,
+    local: bool,
+    token: String,
+    server_id: String,
+}
+
+/// Checks one server address: its music libraries, if it answers in time.
+fn probe(
+    http: &Client,
+    client_id: &str,
+    url: Url,
+    local: bool,
+    token: String,
+    server_id: String,
+    timeout: Duration,
+) -> Result<Found> {
+    let sections = headers(http.get(url.join("/library/sections")?), client_id)
+        .header("X-Plex-Token", &token)
+        .timeout(timeout)
+        .send()?
+        .error_for_status()?
+        .json::<Envelope<Sections>>()?;
+    let music: Vec<Section> = sections
+        .container
+        .directories
+        .into_iter()
+        .filter(|s| matches!(s.kind.as_str(), "artist" | "music"))
+        .collect();
+    if music.is_empty() {
+        bail!("no music library");
+    }
+    Ok(Found { endpoint: Endpoint { url, local }, token, server_id, music })
 }
 
 const KEYRING_ACCOUNT: &str = "Plex";
@@ -324,7 +366,66 @@ impl Plex {
         let Some(account) = crate::credentials::read::<Account>(KEYRING_ACCOUNT)? else {
             return Ok(None);
         };
-        Ok(Some(Self::discover(http_client()?, account, None)?))
+        let http = http_client()?;
+        // The address that worked last time usually still does: use it straight away.
+        if let Some(saved) = account.server.clone()
+            && let Ok(found) = probe(
+                &http,
+                &account.client_id,
+                saved.url,
+                saved.local,
+                saved.token,
+                saved.server_id,
+                Duration::from_secs(3),
+            )
+        {
+            return Ok(Some(Self::from_found(http, account, found, None)?));
+        }
+        Ok(Some(Self::discover(http, account, None)?))
+    }
+
+    /// Saves the working address for next launch (in the background).
+    fn remember(&self) {
+        let mut account = self.account.clone();
+        account.server = Some(SavedServer {
+            url: self.server(),
+            local: self.is_local(),
+            token: self.token.clone(),
+            server_id: self.server_id.clone(),
+        });
+        thread::spawn(move || {
+            let _ = crate::credentials::save(KEYRING_ACCOUNT, &account);
+        });
+    }
+
+    /// Asks the server for a tiny reply. Keeps the connection warm while playing
+    /// and notices a dead address early (then finds a new one).
+    pub fn ping(&self) -> bool {
+        let alive = self
+            .request("/identity")
+            .and_then(|request| Ok(request.timeout(Duration::from_secs(5)).send()?.error_for_status()?))
+            .is_ok();
+        alive || self.reconnect()
+    }
+
+    /// A fingerprint of when the chosen libraries last changed; the same value
+    /// means the saved album list is still current.
+    pub fn library_stamp(&self, wanted: &[String]) -> Option<String> {
+        let sections = self
+            .send("/library/sections", |request| request.timeout(Duration::from_secs(5)))
+            .ok()?
+            .json::<Envelope<Sections>>()
+            .ok()?;
+        let chosen = self.chosen_sections(wanted);
+        let mut stamp: Vec<String> = sections
+            .container
+            .directories
+            .iter()
+            .filter(|section| chosen.is_empty() || chosen.contains(&section.key))
+            .map(|section| format!("{}:{}:{}", section.key, section.changed_at, section.updated_at))
+            .collect();
+        stamp.sort();
+        Some(format!("{}|{}", self.server_id, stamp.join(",")))
     }
 
     pub fn forget() -> Result<()> {
@@ -369,6 +470,7 @@ impl Plex {
         let account = Account {
             token: account_token,
             client_id,
+            server: None,
         };
         let _ = crate::credentials::save(KEYRING_ACCOUNT, &account);
         Self::discover(http, account, None)
@@ -398,6 +500,7 @@ impl Plex {
                 if let Ok(mut endpoint) = self.endpoint.write() {
                     *endpoint = found.endpoint;
                 }
+                self.remember();
                 true
             }
             Err(_) => false,
@@ -418,10 +521,16 @@ impl Plex {
 
     fn discover(http: Client, account: Account, current: Option<(&str, &str)>) -> Result<Self> {
         let found = Self::find_server(&http, &account, current.map(|(server, _)| server))?;
+        let plex = Self::from_found(http, account, found, current.map(|(_, library)| library))?;
+        plex.remember();
+        Ok(plex)
+    }
+
+    fn from_found(http: Client, account: Account, found: Found, library: Option<&str>) -> Result<Self> {
         let section = found
             .music
             .iter()
-            .find(|s| current.is_none_or(|(_, library)| s.key == library))
+            .find(|s| library.is_none_or(|library| s.key == library))
             .or(found.music.first())
             .context("No Plex music library was found")?;
         Ok(Self {
@@ -514,25 +623,8 @@ impl Plex {
         for (index, (_, url, local, token, server_id)) in candidates.into_iter().enumerate() {
             let (tx, http, client_id) = (tx.clone(), http.clone(), account.client_id.clone());
             thread::spawn(move || {
-                let probe = || -> Result<Found> {
-                    let sections = headers(http.get(url.join("/library/sections")?), &client_id)
-                        .header("X-Plex-Token", &token)
-                        .timeout(Duration::from_secs(6))
-                        .send()?
-                        .error_for_status()?
-                        .json::<Envelope<Sections>>()?;
-                    let music: Vec<Section> = sections
-                        .container
-                        .directories
-                        .into_iter()
-                        .filter(|s| matches!(s.kind.as_str(), "artist" | "music"))
-                        .collect();
-                    if music.is_empty() {
-                        bail!("no music library");
-                    }
-                    Ok(Found { endpoint: Endpoint { url, local }, token, server_id, music })
-                };
-                let _ = tx.send((index, probe().map_err(|error| describe_failure(&error))));
+                let result = probe(&http, &client_id, url, local, token, server_id, Duration::from_secs(6));
+                let _ = tx.send((index, result.map_err(|error| describe_failure(&error))));
             });
         }
         drop(tx);
@@ -803,6 +895,17 @@ impl Plex {
         Ok(())
     }
 
+    /// The song's audio from a byte offset onward (to resume or jump a download).
+    pub fn track_audio_from(&self, track: &Entry, offset: u64) -> Result<reqwest::blocking::Response> {
+        let part = track
+            .media
+            .iter()
+            .find_map(|m| m.parts.first())
+            .context("Plex gave this track no playable file")?;
+        let range = format!("bytes={offset}-");
+        self.send(&part.key, |request| request.timeout(Duration::from_secs(120)).header("Range", range.as_str()))
+    }
+
     pub fn track_audio(&self, track: &Entry) -> Result<reqwest::blocking::Response> {
         let part = track
             .media
@@ -832,6 +935,7 @@ mod tests {
             account: Account {
                 token: String::new(),
                 client_id: String::new(),
+                server: None,
             },
             endpoint: Arc::new(RwLock::new(Endpoint {
                 url: Url::parse("http://127.0.0.1:32400").unwrap(),

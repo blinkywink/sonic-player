@@ -1,5 +1,6 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+mod cache;
 mod credentials;
 #[cfg(windows)]
 mod desktop;
@@ -110,6 +111,12 @@ struct State {
     leveling_note: String,
     /// The next library load re-fetches every track's loudness (after Refresh).
     reload_all_loudness: bool,
+    /// Stall watchdog: when playback last moved, and where it was.
+    last_moved: Instant,
+    last_seen_position: f32,
+    stall_restarts: u32,
+    /// Last keep-alive ping to the server while playing.
+    last_ping: Instant,
     /// Page shown on the previous tick, to refresh views when the user arrives on them.
     last_page: i32,
     /// Playlist cover mosaics, keyed by the album art keys they were built from.
@@ -1478,6 +1485,13 @@ impl State {
         self.seeking = false;
         self.pending_seek = None;
         self.current = index;
+        self.last_moved = Instant::now();
+        self.stall_restarts = 0;
+        // The next song is preloaded for gapless playback (and saved to the disk
+        // cache); also have the one after it on disk, so skipping ahead is instant.
+        if let Some(after) = self.queue.get(index + 2) {
+            warm(&plex, after);
+        }
         self.record_history(&track);
         self.playback_restored = true;
         self.loading = handoff.is_none();
@@ -1645,9 +1659,13 @@ impl State {
                 match result {
                     Ok((plex, albums)) => {
                         self.sync_library(plex.clone(), &albums, tx);
+                        let changed = self.plex_albums != albums;
                         self.apply_plex_connection(ui, plex);
                         self.publish_plex_libraries(ui);
                         self.plex_albums = albums;
+                        if changed {
+                            self.save_albums();
+                        }
                         self.rebuild_library(ui);
                         self.restore_playback(ui);
                         ui.set_status(format!("{} albums", self.albums.len()).into());
@@ -1796,7 +1814,20 @@ impl State {
             }
             Event::Lyrics(key, lines) => {
                 self.lyrics_pending.remove(&key);
+                let found = lines.is_some();
                 self.lyrics_cache.insert(key.clone(), lines);
+                if found {
+                    let saved: HashMap<String, Vec<lyrics::Line>> = self
+                        .lyrics_cache
+                        .iter()
+                        .filter_map(|(key, lines)| Some((key.clone(), lines.clone()?)))
+                        .collect();
+                    thread::spawn(move || {
+                        if let (Some(path), Ok(bytes)) = (lyrics_path(), serde_json::to_vec(&saved)) {
+                            let _ = cache::write_atomic(&path, &bytes);
+                        }
+                    });
+                }
                 if key == self.lyrics_key {
                     self.present_lyrics(ui);
                 }
@@ -1840,6 +1871,15 @@ impl State {
                 });
                 match result {
                     Ok(duration) => self.audio_started(ui, tx, duration),
+                    // Deleted from Plex since the library was saved: move on.
+                    Err(err) if err.to_string().contains("404") => {
+                        ui.set_status("That song isn't on Plex anymore; skipped it.".into());
+                        if let Some(track) = self.queue.get(self.current) {
+                            let album = track.parent_rating_key.clone();
+                            self.loaded_tracks.remove(&album);
+                        }
+                        self.advance(ui, tx, true);
+                    }
                     Err(err) => ui.set_playback_error(format!("Playback: {err}").into()),
                 }
             }
@@ -1871,6 +1911,47 @@ impl State {
         });
     }
 
+    /// Stall watchdog and keep-alive: reopens a song that's "playing" but hasn't
+    /// moved for 12 seconds, and pings the server every 30 seconds while playing.
+    fn watch_playback(&mut self, ui: &Sonic, tx: &Sender<Event>) {
+        let playing = ui.get_playing() && !self.loading && !self.seeking;
+        let position = ui.get_position();
+        if !playing || (position - self.last_seen_position).abs() > 0.05 {
+            self.last_seen_position = position;
+            self.last_moved = Instant::now();
+        } else if self.last_moved.elapsed() > Duration::from_secs(12)
+            && self.stall_restarts < 3
+            && self.current < self.queue.len()
+        {
+            self.last_moved = Instant::now();
+            self.stall_restarts += 1;
+            let restarts = self.stall_restarts;
+            self.resume = Some((self.queue[self.current].rating_key.clone(), position));
+            self.started_at = None;
+            self.start(ui, tx, self.current);
+            self.stall_restarts = restarts;
+            ui.set_status("Reconnecting…".into());
+        }
+        if playing && self.last_ping.elapsed() > Duration::from_secs(30) {
+            self.last_ping = Instant::now();
+            if let Some(plex) = self.plex.clone() {
+                thread::spawn(move || {
+                    plex.ping();
+                });
+            }
+        }
+    }
+
+    /// Saves the Plex album list for the next launch (in the background).
+    fn save_albums(&self) {
+        let albums = self.plex_albums.clone();
+        thread::spawn(move || {
+            if let (Some(path), Ok(bytes)) = (albums_path(), serde_json::to_vec(&albums)) {
+                let _ = cache::write_atomic(&path, &bytes);
+            }
+        });
+    }
+
     /// Saves the Plex album tracks for the next run (in the background).
     fn save_tracks(&self) {
         let tracks: HashMap<String, Vec<Entry>> = self
@@ -1881,7 +1962,7 @@ impl State {
             .collect();
         thread::spawn(move || {
             if let (Some(path), Ok(bytes)) = (tracks_path(), serde_json::to_vec(&tracks)) {
-                let _ = std::fs::write(path, bytes);
+                let _ = cache::write_atomic(&path, &bytes);
             }
         });
     }
@@ -2032,6 +2113,16 @@ fn loudness_path() -> Option<PathBuf> {
     Some(library::path()?.with_file_name("loudness.json"))
 }
 
+/// Where the Plex album list is saved between runs (shown before Plex connects).
+fn albums_path() -> Option<PathBuf> {
+    Some(library::path()?.with_file_name("albums.json"))
+}
+
+/// Where saved lyrics live.
+fn lyrics_path() -> Option<PathBuf> {
+    Some(library::path()?.with_file_name("lyrics.json"))
+}
+
 /// Where album tracks are saved between runs.
 fn tracks_path() -> Option<PathBuf> {
     Some(library::path()?.with_file_name("tracks.json"))
@@ -2106,18 +2197,10 @@ fn load_audio(plex: Option<Plex>, track: Entry, cancel: Arc<AtomicBool>) -> Resu
         Some(path) => local::loudness(path),
         None => plex.as_ref().and_then(|plex| plex.loudness(&track)),
     };
-    let (input, length, download): (Box<dyn AudioInput>, _, _) =
-        if let Some(path) = &track.local_path {
-            let file = File::open(path).context("Opening local file")?;
-            let length = file.metadata()?.len();
-            (Box::new(file), Some(length), None)
-        } else {
-            let response = plex.context("Plex is disconnected")?.track_audio(&track)?;
-            let length = response.content_length();
-            let input = stream::BufferedDownload::new(response, length, cancel)?;
-            let download = input.status();
-            (Box::new(input), length, Some(download))
-        };
+    // From the disk cache when it's there; otherwise streamed with reconnecting,
+    // jumping on seek and saving to the cache.
+    let (input, length, download) = stream::open_track(plex, &track, cancel)?;
+    let input: Box<dyn AudioInput> = Box::new(input);
     let mut decoder = Decoder::builder()
         .with_data(std::io::BufReader::new(input))
         .with_seekable(true);
@@ -2129,6 +2212,20 @@ fn load_audio(plex: Option<Plex>, track: Entry, cancel: Arc<AtomicBool>) -> Resu
         download,
         loudness,
     })
+}
+
+/// Preloads a song into the disk cache in the background.
+fn warm(plex: &Option<Plex>, track: &Entry) {
+    if track.local_path.is_some() {
+        return;
+    }
+    let Some(plex) = plex.clone() else { return };
+    let track = track.clone();
+    cache::warm(track.rating_key.clone(), move || {
+        let response = plex.track_audio(&track)?;
+        let length = response.content_length();
+        Ok((response, length))
+    });
 }
 
 /// Album covers in grids and lists. 320 px is sharper than any tile at 150% scaling
@@ -2727,6 +2824,10 @@ fn main() -> Result<()> {
         plex::restore_loudness(&path);
     }
     log_panics(library::path().map(|path| path.with_file_name("crash.log")));
+    // Songs played or preloaded are kept here (up to 5 GB, oldest removed first).
+    if let Some(dir) = library::path().map(|path| path.with_file_name("audio")) {
+        cache::init(dir, 5 * 1024 * 1024 * 1024);
+    }
     ui.set_app_version(env!("CARGO_PKG_VERSION").into());
     ui.set_eq_preset_index(preferences.eq_preset.clamp(0, 6));
     ui.set_discord_id(preferences.discord_id.as_str().into());
@@ -2766,6 +2867,10 @@ fn main() -> Result<()> {
         pause_after_start: false,
         leveling_note: String::new(),
         reload_all_loudness: false,
+        last_moved: Instant::now(),
+        last_seen_position: 0.0,
+        stall_restarts: 0,
+        last_ping: Instant::now(),
         mosaics: RefCell::new(HashMap::new()),
         theme_fade: ThemeFade::default(),
         lyrics_key: String::new(),
@@ -2905,6 +3010,9 @@ fn main() -> Result<()> {
                 return;
             };
             let album = state.albums[index].clone();
+            if let Some(first) = state.loaded_tracks.get(key.as_str()).and_then(|tracks| tracks.first()) {
+                warm(&state.plex, first);
+            }
             state.tracks.clear();
             ui.set_selected_key(key.clone());
             ui.set_album_title(album.title.as_str().into());
@@ -3090,6 +3198,35 @@ fn main() -> Result<()> {
         }
     });
     state.borrow().publish_local_folders(&ui);
+    // The library from last time shows straight away, before Plex connects.
+    if let Some(albums) = albums_path()
+        .and_then(|path| std::fs::read(path).ok())
+        .and_then(|bytes| serde_json::from_slice::<Vec<Entry>>(&bytes).ok())
+        && !albums.is_empty()
+    {
+        let mut state = state.borrow_mut();
+        state.plex_albums = albums;
+        state.rebuild_library(&ui);
+    }
+    if let Some(saved) = lyrics_path()
+        .and_then(|path| std::fs::read(path).ok())
+        .and_then(|bytes| serde_json::from_slice::<HashMap<String, Vec<lyrics::Line>>>(&bytes).ok())
+    {
+        state
+            .borrow_mut()
+            .lyrics_cache
+            .extend(saved.into_iter().map(|(key, lines)| (key, Some(lines))));
+    }
+    // Sonic crashed last time: say so (the details are in crash.log).
+    if let Some(log) = library::path().map(|path| path.with_file_name("crash.log")) {
+        let size = std::fs::metadata(&log).map(|m| m.len()).unwrap_or(0);
+        let seen = log.with_extension("seen");
+        let reported: u64 = std::fs::read_to_string(&seen).ok().and_then(|t| t.trim().parse().ok()).unwrap_or(0);
+        if size > reported {
+            ui.set_status(format!("Sonic closed unexpectedly last time. Details: {}", log.display()).into());
+            let _ = std::fs::write(&seen, size.to_string());
+        }
+    }
     // Album tracks saved by an earlier run: albums open instantly, nothing reloads.
     if let Some(saved) = tracks_path()
         .and_then(|path| std::fs::read(path).ok())
@@ -4108,7 +4245,27 @@ fn main() -> Result<()> {
         let wanted = preferences.plex_libraries.clone();
         thread::spawn(move || {
             let event = match Plex::restore() {
-                Ok(Some(plex)) => Event::Library(plex.albums(&wanted).map(|albums| (plex, albums))),
+                Ok(Some(plex)) => {
+                    // Unchanged since last time: use the saved album list.
+                    let stamp = plex.library_stamp(&wanted);
+                    let stamp_path = library::path().map(|path| path.with_file_name("library-stamp"));
+                    let saved = stamp_path.as_ref().and_then(|path| std::fs::read_to_string(path).ok());
+                    let cached = albums_path()
+                        .and_then(|path| std::fs::read(path).ok())
+                        .and_then(|bytes| serde_json::from_slice::<Vec<Entry>>(&bytes).ok());
+                    match (stamp, cached) {
+                        (Some(stamp), Some(albums)) if saved.as_deref() == Some(stamp.as_str()) => {
+                            Event::Library(Ok((plex, albums)))
+                        }
+                        (stamp, _) => {
+                            let result = plex.albums(&wanted);
+                            if let (Ok(_), Some(stamp), Some(path)) = (&result, stamp, stamp_path) {
+                                let _ = cache::write_atomic(&path, stamp.as_bytes());
+                            }
+                            Event::Library(result.map(|albums| (plex, albums)))
+                        }
+                    }
+                }
                 Ok(None) => Event::NoSavedPlex,
                 Err(error) => Event::Library(Err(error)),
             };
@@ -4258,6 +4415,7 @@ fn main() -> Result<()> {
             ui.set_discord_status(message.into());
         }
         state.preload_next(&ui, &tx);
+        state.watch_playback(&ui, &tx);
         state.refresh_track_art(&ui, &tx);
         media.update(&ui, state.queue.get(state.current));
     });

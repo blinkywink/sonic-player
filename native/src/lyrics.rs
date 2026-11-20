@@ -2,10 +2,10 @@
 
 use crate::plex::Entry;
 use lofty::{file::TaggedFileExt, tag::ItemKey};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct Line {
     /// Start time in seconds; `None` for unsynced lyrics.
     pub time: Option<f32>,
