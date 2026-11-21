@@ -109,6 +109,8 @@ struct State {
     pause_after_start: bool,
     /// What volume leveling applies to the playing song (shown in Settings).
     leveling_note: String,
+    /// The album whose cover the player is showing (to keep it within an album).
+    art_album: String,
     /// The next library load re-fetches every track's loudness (after Refresh).
     reload_all_loudness: bool,
     /// Stall watchdog: when playback last moved, and where it was.
@@ -794,7 +796,7 @@ impl State {
         ui.set_status("Up next cleared".into());
     }
 
-    fn present_queued_track(&self, ui: &Sonic) {
+    fn present_queued_track(&mut self, ui: &Sonic) {
         if let Some(track) = self.queue.get(self.current) {
             ui.set_track_key(track.rating_key.as_str().into());
             ui.set_track_title(track.title.as_str().into());
@@ -807,6 +809,7 @@ impl State {
                 .or_else(|| self.artwork.get(&track.parent_rating_key))
             {
                 ui.set_playing_art(art.clone());
+                self.art_album.clone_from(&track.parent_rating_key);
             }
         }
     }
@@ -1318,6 +1321,7 @@ impl State {
         ui.set_track_title("—".into());
         ui.set_track_artist("No track".into());
         ui.set_playing_art(Image::default());
+        self.art_album.clear();
         self.art_theme = None;
         self.refresh_theme(ui);
         ui.set_duration(0.0);
@@ -1475,13 +1479,11 @@ impl State {
             return;
         }
         // Moving on within the same album keeps its cover (no blank-and-reload).
-        // Another song from the album already showing keeps its cover: skipping or
+        // Another song from the album whose cover is showing keeps it: skipping or
         // playing on within an album doesn't blank and reload it.
-        let same_album = ui.get_playing_art().size().width > 0
-            && self
-                .queue
-                .get(self.current)
-                .is_some_and(|previous| previous.parent_rating_key == track.parent_rating_key);
+        let same_album = !self.art_album.is_empty()
+            && self.art_album == track.parent_rating_key
+            && ui.get_playing_art().size().width > 0;
         self.scrobble(tx);
         self.cancel_audio.store(true, Ordering::Relaxed);
         self.cancel_audio = Arc::new(AtomicBool::new(false));
@@ -1526,6 +1528,7 @@ impl State {
             // Show the album's cover from the library straight away (it's usually
             // loaded already); the sharper Now Playing copy replaces it when ready.
             ui.set_playing_art(self.artwork.get(&track.parent_rating_key).cloned().unwrap_or_default());
+            self.art_album.clone_from(&track.parent_rating_key);
         }
         let thumb = if track.parent_thumb.is_empty() {
             &track.thumb
@@ -1847,6 +1850,9 @@ impl State {
                     self.art_theme = sampled_theme(&pixels);
                     self.refresh_theme(ui);
                     ui.set_playing_art(Image::from_rgba8(pixels));
+                    if let Some(track) = self.queue.get(self.current) {
+                        self.art_album.clone_from(&track.parent_rating_key);
+                    }
                 }
             }
             Event::Prefetched(id, result) => {
@@ -2880,6 +2886,7 @@ fn main() -> Result<()> {
         audio_devices: Vec::new(),
         pause_after_start: false,
         leveling_note: String::new(),
+        art_album: String::new(),
         reload_all_loudness: false,
         last_moved: Instant::now(),
         last_seen_position: 0.0,
