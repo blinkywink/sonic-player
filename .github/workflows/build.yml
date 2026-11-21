@@ -131,10 +131,8 @@ jobs:
           plutil -insert DTSDKName -string "iphoneos$sdk" "$app/Info.plist"
           plutil -insert DTPlatformVersion -string "$sdk" "$app/Info.plist"
           plutil -lint "$app/Info.plist"
-          # Ad-hoc signature: sideloading tools replace it with yours, but some
-          # (zsign-based ones) need a signature to already be there.
-          codesign --force --sign - --timestamp=none "$app"
-          codesign --verify --verbose "$app"
+          # No signature at all: sideloading tools add yours. A placeholder (ad-hoc)
+          # signature made Kravasign fail silently on some builds.
           (cd dist && zip -qry sonic-ios-unsigned.ipa Payload)
       - uses: actions/upload-artifact@v4
         with:
