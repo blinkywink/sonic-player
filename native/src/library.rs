@@ -53,6 +53,12 @@ pub struct Preferences {
     /// Draw with the GPU (smooth scrolling). Off by default: the CPU renderer uses
     /// far less memory (about 40 MB instead of 300+ on integrated graphics).
     pub gpu_rendering: bool,
+    /// Listen along: your name and picture (small JPEG, base64), the relay address
+    /// for when you're away from home, and this install's id.
+    pub jam_name: String,
+    pub jam_avatar: String,
+    pub jam_server: String,
+    pub jam_client: String,
 }
 
 impl Default for Preferences {
@@ -87,6 +93,10 @@ impl Default for Preferences {
             art_theme: None,
             close_to_tray: true,
             gpu_rendering: false,
+            jam_name: String::new(),
+            jam_avatar: String::new(),
+            jam_server: String::new(),
+            jam_client: String::new(),
         }
     }
 }

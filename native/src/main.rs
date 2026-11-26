@@ -6,6 +6,7 @@ mod credentials;
 mod desktop;
 mod discord;
 mod eq;
+mod jam;
 mod lastfm;
 mod library;
 mod local;
@@ -71,6 +72,8 @@ enum Event {
     Lyrics(String, Option<Vec<lyrics::Line>>),
     /// The system default output device and every output device, by name.
     AudioDevices(Option<String>, Vec<String>),
+    /// Listen along: the jam changed, or its connection did.
+    Jam(jam::Message),
     /// Album tracks loaded in bulk (replacing all Plex ones after a refresh).
     TracksLoaded(u64, HashMap<String, Vec<Entry>>, bool),
 }
@@ -117,6 +120,14 @@ struct State {
     leveling_note: String,
     /// The album whose cover the player is showing (to keep it within an album).
     art_album: String,
+    /// Listen along: the relay connection, the last jam seen (and when), what was
+    /// last shared or applied, where the song was a moment ago (to notice seeks),
+    /// and a short pause after applying someone else's change (so it isn't echoed).
+    jam: Option<jam::Jam>,
+    jam_snapshot: Option<(jam::Snapshot, Instant)>,
+    jam_sig: (Vec<String>, usize, bool),
+    jam_seen: (f32, Instant, bool),
+    jam_quiet_until: Instant,
     /// The next library load re-fetches every track's loudness (after Refresh).
     reload_all_loudness: bool,
     /// Stall watchdog: when playback last moved, and where it was.
@@ -671,6 +682,10 @@ impl State {
             art_theme: self.art_theme,
             close_to_tray: ui.get_close_to_tray(),
             gpu_rendering: ui.get_gpu_rendering(),
+            jam_name: ui.get_jam_name().trim().to_owned(),
+            jam_avatar: self.data.preferences.jam_avatar.clone(),
+            jam_server: ui.get_jam_server().trim().to_owned(),
+            jam_client: self.data.preferences.jam_client.clone(),
             font: ui.get_font_index(),
             discord_id: ui.get_discord_id().trim().to_owned(),
             discord_image: ui.get_discord_image().trim().to_owned(),
@@ -1679,6 +1694,7 @@ impl State {
                 match result {
                     Ok((plex, albums)) => {
                         self.sync_library(plex.clone(), &albums, tx);
+                        self.start_jam(&plex, tx);
                         let changed = self.plex_albums != albums;
                         self.apply_plex_connection(ui, plex);
                         self.publish_plex_libraries(ui);
@@ -1830,6 +1846,12 @@ impl State {
                 self.save_tracks();
             }
             Event::TracksLoaded(..) => {}
+            Event::Jam(jam::Message::Status(text)) => ui.set_jam_status(text.into()),
+            Event::Jam(jam::Message::Snapshot(snapshot, received)) => {
+                self.publish_jam(ui, &snapshot);
+                self.apply_jam(ui, tx, &snapshot, received, false);
+                self.jam_snapshot = Some((snapshot, received));
+            }
             Event::AudioDevices(default, all) => {
                 self.default_device = default;
                 self.audio_devices = all;
@@ -2045,6 +2067,138 @@ impl State {
         });
     }
 
+    /// Connects to the jam relay (watching who's listening) once Plex is up.
+    fn start_jam(&mut self, plex: &Plex, tx: &Sender<Event>) {
+        if self.jam.is_some() {
+            return;
+        }
+        let preferences = &mut self.data.preferences;
+        if preferences.jam_client.is_empty() {
+            preferences.jam_client = jam::new_client_id();
+        }
+        let candidates = jam::candidates(Some(plex.server()), &preferences.jam_server);
+        if candidates.is_empty() {
+            return;
+        }
+        let tx = tx.clone();
+        self.jam = Some(jam::Jam::start(
+            candidates,
+            plex.account_token(),
+            preferences.jam_client.clone(),
+            jam_name(&preferences.jam_name),
+            preferences.jam_avatar.clone(),
+            move |message| {
+                let _ = tx.send(Event::Jam(message));
+            },
+        ));
+    }
+
+    fn publish_jam(&self, ui: &Sonic, snapshot: &jam::Snapshot) {
+        let me = self.jam.as_ref().map(|jam| jam.client().to_owned()).unwrap_or_default();
+        let members: Vec<JamMember> = snapshot
+            .members
+            .iter()
+            .map(|member| {
+                let avatar = avatar_image(&member.avatar);
+                JamMember {
+                    name: member.name.as_str().into(),
+                    has_avatar: avatar.size().width > 0,
+                    avatar,
+                    me: member.client == me,
+                }
+            })
+            .collect();
+        ui.set_jam_members(ModelRc::new(VecModel::from(members)));
+        ui.set_jam_joined(self.jam.as_ref().is_some_and(jam::Jam::joined));
+    }
+
+    /// Shares this app's queue and playback with the jam.
+    fn push_jam(&mut self, ui: &Sonic) {
+        let Some(jam) = &self.jam else { return };
+        let playing = ui.get_playing() || self.loading;
+        let playback = jam::Playback {
+            queue: self.queue.clone(),
+            current: self.current,
+            playing,
+            position: ui.get_position(),
+            ..Default::default()
+        };
+        self.jam_sig = (playback.keys(), self.current, playing);
+        jam.push(playback);
+    }
+
+    /// Plays what the jam plays: the same queue, the same song at the same spot,
+    /// playing or paused to match.
+    fn apply_jam(&mut self, ui: &Sonic, tx: &Sender<Event>, snapshot: &jam::Snapshot, received: Instant, force: bool) {
+        let Some(jam) = self.jam.clone() else { return };
+        if !jam.joined() {
+            return;
+        }
+        let Some(state) = &snapshot.state else {
+            // An empty jam: it starts with your queue.
+            self.push_jam(ui);
+            return;
+        };
+        if state.by == jam.client() && !force {
+            return;
+        }
+        let position = snapshot.position_now(received);
+        let keys = state.keys();
+        let local: Vec<String> = self.queue.iter().map(|track| track.rating_key.clone()).collect();
+        if local != keys {
+            self.queue = state.queue.clone();
+            self.original_order.clear();
+            self.publish_queue(ui);
+        }
+        let loaded = self.player.as_ref().is_some_and(|player| !player.sink.empty()) || self.loading;
+        if state.current < self.queue.len() {
+            if self.current != state.current || !loaded {
+                self.resume = Some((self.queue[state.current].rating_key.clone(), position));
+                self.pause_after_start = !state.playing;
+                self.started_at = None;
+                self.start(ui, tx, state.current);
+            } else {
+                if let Some(player) = &self.player {
+                    if state.playing && player.sink.is_paused() {
+                        player.sink.play();
+                        ui.set_playing(true);
+                    } else if !state.playing && !player.sink.is_paused() {
+                        player.sink.pause();
+                        ui.set_playing(false);
+                    }
+                }
+                if !self.loading
+                    && (ui.get_position() - position).abs() > 2.0
+                    && let Ok(at) = Duration::try_from_secs_f32(position.max(0.0))
+                {
+                    self.seek(tx, at);
+                }
+            }
+        }
+        self.jam_sig = (keys, state.current, state.playing);
+        self.jam_seen = (position, Instant::now(), state.playing);
+        self.jam_quiet_until = Instant::now() + Duration::from_secs(3);
+    }
+
+    /// Each tick while in a jam: share anything you changed (queue, song,
+    /// play/pause, a seek).
+    fn jam_tick(&mut self, ui: &Sonic) {
+        let joined = self.jam.as_ref().is_some_and(jam::Jam::joined);
+        let position = ui.get_position();
+        let (seen, at, was_playing) = self.jam_seen;
+        self.jam_seen = (position, Instant::now(), ui.get_playing());
+        if !joined || Instant::now() < self.jam_quiet_until {
+            return;
+        }
+        let playing = ui.get_playing() || self.loading;
+        let sig = (self.queue.iter().map(|track| track.rating_key.clone()).collect::<Vec<_>>(), self.current, playing);
+        let expected = if was_playing { seen + at.elapsed().as_secs_f32() } else { seen };
+        let seeked = !self.loading && (position - expected).abs() > 2.5;
+        if sig != self.jam_sig || seeked {
+            self.push_jam(ui);
+        }
+    }
+
     fn publish_audio_devices(&self, ui: &Sonic) {
         let mut names: Vec<slint::SharedString> = vec!["System default".into()];
         names.extend(self.audio_devices.iter().map(|name| slint::SharedString::from(name.as_str())));
@@ -2184,6 +2338,21 @@ impl State {
         }
         Ok(())
     }
+}
+
+/// Your jam name, or a friendly default.
+fn jam_name(name: &str) -> String {
+    let name = name.trim();
+    if name.is_empty() { "Sonic listener".to_owned() } else { name.chars().take(40).collect() }
+}
+
+/// A jam picture (base64 JPEG) as an image; empty when there's none.
+fn avatar_image(avatar: &str) -> Image {
+    jam::avatar_pixels(avatar)
+        .map(|pixels| {
+            Image::from_rgba8(SharedPixelBuffer::clone_from_slice(pixels.as_raw(), pixels.width(), pixels.height()))
+        })
+        .unwrap_or_default()
 }
 
 /// Where track loudness is saved between runs (next to the library data).
@@ -2952,6 +3121,9 @@ fn main() -> Result<()> {
     ui.set_online_lyrics(preferences.online_lyrics);
     ui.set_close_to_tray(preferences.close_to_tray);
     ui.set_gpu_rendering(preferences.gpu_rendering);
+    ui.set_jam_name(preferences.jam_name.as_str().into());
+    ui.set_jam_server(preferences.jam_server.as_str().into());
+    ui.set_jam_avatar(avatar_image(&preferences.jam_avatar));
     ui.set_has_tray(cfg!(windows));
     #[cfg(windows)]
     desktop::set_close_to_tray(preferences.close_to_tray);
@@ -3007,6 +3179,11 @@ fn main() -> Result<()> {
         memory_trimmed_at: None,
         leveling_note: String::new(),
         art_album: String::new(),
+        jam: None,
+        jam_snapshot: None,
+        jam_sig: (Vec::new(), 0, false),
+        jam_seen: (0.0, Instant::now(), false),
+        jam_quiet_until: Instant::now(),
         reload_all_loudness: false,
         last_moved: Instant::now(),
         last_seen_position: 0.0,
@@ -4354,6 +4531,76 @@ fn main() -> Result<()> {
     });
     let mut last_presence = (String::new(), String::new(), 0, false);
     let _ = plex::set_manual_address(&preferences.plex_address);
+    ui.on_jam_toggle({
+        let (state, weak, tx) = (state.clone(), ui.as_weak(), tx.clone());
+        move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let Ok(mut state) = state.try_borrow_mut() else { return };
+            let Some(jam) = state.jam.clone() else {
+                ui.set_jam_status("Sign in to Plex first.".into());
+                return;
+            };
+            if jam.joined() {
+                jam.leave();
+                ui.set_jam_joined(false);
+                return;
+            }
+            jam.join();
+            ui.set_jam_joined(true);
+            // Join what's playing in the jam, or start it with your queue.
+            match state.jam_snapshot.clone() {
+                Some((snapshot, received)) if snapshot.state.is_some() => {
+                    state.apply_jam(&ui, &tx, &snapshot, received, true);
+                }
+                _ => state.push_jam(&ui),
+            }
+        }
+    });
+    ui.on_jam_pick_avatar({
+        let (state, weak) = (state.clone(), ui.as_weak());
+        move || {
+            let Some(ui) = weak.upgrade() else { return };
+            #[cfg(windows)]
+            let picked = desktop::pick_image(&ui);
+            #[cfg(not(windows))]
+            let picked: Option<PathBuf> = None;
+            let Some(avatar) = picked
+                .and_then(|path| std::fs::read(path).ok())
+                .and_then(|bytes| jam::avatar_from_image(&bytes))
+            else {
+                return;
+            };
+            let Ok(mut state) = state.try_borrow_mut() else { return };
+            ui.set_jam_avatar(avatar_image(&avatar));
+            state.data.preferences.jam_avatar = avatar.clone();
+            state.save(&ui, "Saved your jam picture.");
+            if let Some(jam) = &state.jam {
+                jam.set_me(jam_name(ui.get_jam_name().as_str()), avatar);
+            }
+        }
+    });
+    ui.on_jam_save_settings({
+        let (state, weak, tx) = (state.clone(), ui.as_weak(), tx.clone());
+        move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let Ok(mut state) = state.try_borrow_mut() else { return };
+            let server_changed = state.data.preferences.jam_server != ui.get_jam_server().trim();
+            state.save(&ui, "Saved listen along settings.");
+            if server_changed {
+                // Reconnect through the new address.
+                if let Some(jam) = state.jam.take() {
+                    jam.stop();
+                }
+                ui.set_jam_joined(false);
+                if let Some(plex) = state.plex.clone() {
+                    state.start_jam(&plex, &tx);
+                }
+            } else if let Some(jam) = &state.jam {
+                let avatar = state.data.preferences.jam_avatar.clone();
+                jam.set_me(jam_name(ui.get_jam_name().as_str()), avatar);
+            }
+        }
+    });
     ui.on_close_to_tray_toggled({
         let (state, weak) = (state.clone(), ui.as_weak());
         move || {
@@ -4587,6 +4834,7 @@ fn main() -> Result<()> {
         state.preload_next(&ui, &tx);
         state.watch_playback(&ui, &tx);
         state.idle_upkeep(&ui);
+        state.jam_tick(&ui);
         state.refresh_track_art(&ui, &tx);
         media.update(&ui, state.queue.get(state.current));
     });
@@ -4624,6 +4872,11 @@ fn main() -> Result<()> {
     ui.run()?;
     exit_state.borrow_mut().flush_session(&ui, true)?;
     exit_state.borrow().write_tracks_now();
+    // Leave the jam on the way out.
+    if let Some(jam) = exit_state.borrow().jam.clone() {
+        jam.leave();
+        thread::sleep(Duration::from_millis(400));
+    }
     // Let go of the single-instance lock (owned by the main timer) first so the
     // new copy can start.
     drop(timer);

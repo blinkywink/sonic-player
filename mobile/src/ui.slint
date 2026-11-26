@@ -5,6 +5,7 @@ export struct AlbumRow { items: [int], }
 export struct TrackItem { number: string, title: string, time: string, current: bool, }
 export struct QueueItem { title: string, artist: string, art: image, current: bool, }
 export struct LibraryItem { title: string, selected: bool, }
+export struct JamMember { name: string, avatar: image, has-avatar: bool, me: bool, }
 export struct LyricItem { text: string, time: float, y: float, height: float, }
 
 global Theme {
@@ -295,6 +296,16 @@ export component MobileApp inherits Window {
     callback open-playing-album;
     callback add-album-to-queue(string);
     callback add-track-to-queue(int);
+    // Listen along.
+    in property <[JamMember]> jam-members;
+    in property <bool> jam-joined;
+    in property <string> jam-status;
+    in property <string> jam-name;
+    in property <string> jam-server;
+    in property <image> jam-avatar;
+    callback jam-toggle;
+    callback jam-save(string, string);
+    callback use-cover-as-avatar(string);
     // A short confirmation shown above the mini player.
     in-out property <string> toast;
     // Album whose hold menu is open ("" = closed).
@@ -537,7 +548,7 @@ export component MobileApp inherits Window {
     if root.screen == 2: Rectangle {
         y: 0; height: parent.height - root.content-bottom;
         if root.queue.length == 0: Text {
-            x: 24px; y: root.top-inset + 24px; width: parent.width - 48px;
+            x: 24px; y: root.top-inset + (root.signed-in ? 104px : 24px); width: parent.width - 48px;
             text: "Nothing playing yet. Pick an album to start."; wrap: word-wrap; color: Theme.muted; font-size: 15px;
         }
         queue-scroll := Flickable {
@@ -546,6 +557,44 @@ export component MobileApp inherits Window {
           queue-page := VerticalLayout {
             width: queue-scroll.width;
             padding-top: 8px;
+            // Listen together: who's in the jam, and Start / Join / Leave.
+            if root.signed-in: Rectangle {
+                height: 80px;
+                Rectangle {
+                    x: 16px; y: 4px; width: parent.width - 32px; height: 68px; border-radius: 16px;
+                    background: root.jam-joined ? Theme.selected : Theme.surface;
+                    HorizontalLayout {
+                        padding-left: 14px; padding-right: 10px; spacing: 10px;
+                        VerticalLayout {
+                            alignment: center; spacing: 4px; horizontal-stretch: 1;
+                            Label { text: root.jam-joined ? "Listening together" : "Listen together"; font-size: 16px; font-weight: 700; height: 21px; }
+                            HorizontalLayout {
+                                spacing: 4px; alignment: start; height: 22px;
+                                for member in root.jam-members: Rectangle {
+                                    width: 22px; height: 22px; border-radius: 11px; clip: true; background: Theme.raised;
+                                    if member.has-avatar: Image { width: parent.width; height: parent.height; source: member.avatar; image-fit: cover; }
+                                    if !member.has-avatar: Text { width: parent.width; height: parent.height; text: "♪"; font-size: 11px; color: Theme.muted; horizontal-alignment: center; vertical-alignment: center; }
+                                }
+                                Label {
+                                    text: root.jam-status != "" ? root.jam-status
+                                        : root.jam-members.length == 0 ? "Nobody's here yet"
+                                        : root.jam-members.length == 1 ? root.jam-members[0].name
+                                        : root.jam-members.length + " listening";
+                                    font-size: 13px; color: Theme.muted; overflow: elide; horizontal-stretch: 1;
+                                }
+                            }
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            Pill {
+                                width: 100px; height: 40px; filled: !root.jam-joined;
+                                label: root.jam-joined ? "Leave" : root.jam-members.length > 0 ? "Join" : "Start";
+                                clicked => { root.jam-toggle(); }
+                            }
+                        }
+                    }
+                }
+            }
             for item[index] in root.queue: VerticalLayout {
               if index == 1: Rectangle { height: 36px; Label { x: 20px; y: 10px; height: 20px; text: "Up next"; font-size: 13px; font-weight: 600; color: Theme.muted; } }
               SwipeRow {
@@ -620,6 +669,21 @@ export component MobileApp inherits Window {
                         TouchArea { clicked => { root.toggle-library(index); } }
                     }
                 }
+            }
+            Card {
+                heading: "LISTEN ALONG";
+                Text { text: "Jam with anyone signed in to the same Plex account: one shared queue, kept in sync. Start or join from the Queue tab."; wrap: word-wrap; color: Theme.muted; font-size: 13px; }
+                HorizontalLayout {
+                    spacing: 12px;
+                    Rectangle {
+                        width: 48px; height: 48px; border-radius: 24px; clip: true; background: Theme.raised;
+                        Image { width: parent.width; height: parent.height; source: root.jam-avatar; image-fit: cover; }
+                    }
+                    Text { text: "Your picture: hold an album and choose Use as my picture."; wrap: word-wrap; color: Theme.muted; font-size: 13px; vertical-alignment: center; horizontal-stretch: 1; }
+                }
+                jam-name-field := Field { placeholder: "Your name"; text: root.jam-name; }
+                jam-server-field := Field { placeholder: "Jam server, e.g. jam.example.com"; text: root.jam-server; }
+                Pill { label: "Save"; clicked => { root.jam-save(jam-name-field.text, jam-server-field.text); } }
             }
             Card {
                 heading: "LIBRARY";
@@ -796,7 +860,7 @@ export component MobileApp inherits Window {
         background: #00000099;
         TouchArea { clicked => { root.menu-key = ""; } }
         Rectangle {
-            x: 12px; width: parent.width - 24px; height: 176px;
+            x: 12px; width: parent.width - 24px; height: 232px;
             y: parent.height - self.height - max(root.bottom-inset, 12px) - 8px;
             border-radius: 22px; background: Theme.surface; border-width: 1px; border-color: Theme.hairline;
             TouchArea { }
@@ -806,6 +870,10 @@ export component MobileApp inherits Window {
                 Pill {
                     label: "Add to queue"; icon: @image-url("icons/queue.svg"); filled: true;
                     clicked => { root.add-album-to-queue(root.menu-key); root.menu-key = ""; }
+                }
+                Pill {
+                    label: "Use as my picture";
+                    clicked => { root.use-cover-as-avatar(root.menu-key); root.menu-key = ""; }
                 }
                 Pill { label: "Cancel"; clicked => { root.menu-key = ""; } }
             }

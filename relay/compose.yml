@@ -1,0 +1,15 @@
+# Sonic listen-along relay: a tiny, always-on service (about 15 MB of memory).
+# docker compose -f compose.yml up -d   (restarts by itself, including after reboots)
+services:
+  jam:
+    image: python:3.13-alpine
+    container_name: sonic-jam
+    restart: unless-stopped
+    command: ["python", "-u", "/app/relay.py"]
+    environment:
+      JAM_PORT: "8790"
+    ports:
+      - "0.0.0.0:8790:8790"
+    volumes:
+      - ./relay.py:/app/relay.py:ro
+    mem_limit: 64m

@@ -4,6 +4,7 @@ export struct Album { key: string, title: string, artist: string, year: string, 
 export struct AlbumRow { offset: int, count: int, heading: string, has-year: bool, }
 export struct Track { key: string, number: int, title: string, time: string, }
 export struct PlaylistCard { name: string, count: int, artwork: image, has-art: bool, }
+export struct JamMember { name: string, avatar: image, has-avatar: bool, me: bool, }
 export struct QueueTrack { title: string, artist: string, album: string, album-key: string, time: string, number: int, art: image, }
 export struct SongHit { album-key: string, track-index: int, number: int, title: string, description: string, time: string, art: image, }
 export struct QueueLine { index: int, height: int, gap: int, grouped: bool, track: QueueTrack, number: int, }
@@ -592,6 +593,16 @@ export component Sonic inherits Window {
     in property <bool> has-tray;
     // GPU drawing (smooth scrolling); off is lighter on memory. Applies after a restart.
     in-out property <bool> gpu-rendering: false;
+    // Listen along: who's in the jam, whether you are, and your settings.
+    in property <[JamMember]> jam-members;
+    in property <bool> jam-joined;
+    in property <string> jam-status;
+    in-out property <string> jam-name;
+    in-out property <string> jam-server;
+    in property <image> jam-avatar;
+    callback jam-toggle;
+    callback jam-pick-avatar;
+    callback jam-save-settings;
     callback close-to-tray-toggled;
     changed close-to-tray => { root.close-to-tray-toggled(); }
     changed gpu-rendering => { root.close-to-tray-toggled(); }
@@ -1256,6 +1267,38 @@ export component Sonic inherits Window {
                     width: min(776px, parent.width - 48px);
                     height: parent.height - 56px;
                     spacing: 21px;
+                    // Listen together: who's in the jam, and Start / Join / Leave.
+                    if root.connected: Rectangle {
+                        height: 54px; border-radius: 14px;
+                        background: root.jam-joined ? Palette.selected : Palette.surface;
+                        border-width: 1px; border-color: Palette.hairline;
+                        HorizontalLayout {
+                            padding-left: 16px; padding-right: 10px; spacing: 12px;
+                            Label { text: root.jam-joined ? "Listening together" : "Listen together"; font-weight: 600; font-size: 14px; }
+                            for member in root.jam-members: HorizontalLayout {
+                                spacing: 6px;
+                                VerticalLayout {
+                                    alignment: center;
+                                    Rectangle {
+                                        width: 28px; height: 28px; border-radius: 14px; clip: true; background: Palette.glass;
+                                        if member.has-avatar: Image { width: parent.width; height: parent.height; source: member.avatar; image-fit: cover; }
+                                        if !member.has-avatar: Label { width: parent.width; height: parent.height; text: "♪"; horizontal-alignment: center; font-size: 13px; }
+                                    }
+                                }
+                                Label { text: member.me ? member.name + " (you)" : member.name; font-size: 12px; color: Palette.muted; }
+                            }
+                            Rectangle { horizontal-stretch: 1; }
+                            if root.jam-status != "": Label { text: root.jam-status; font-size: 12px; color: Palette.muted; }
+                            VerticalLayout {
+                                alignment: center;
+                                Action {
+                                    width: 104px; height: 34px; font-size: 13px; active: !root.jam-joined;
+                                    label: root.jam-joined ? "Leave" : root.jam-members.length > 0 ? "Join" : "Start jam";
+                                    clicked => { root.jam-toggle(); }
+                                }
+                            }
+                        }
+                    }
                     if root.queue.length > 0: HorizontalLayout {
                         height: 35px; spacing: 14px;
                         Label {
@@ -1914,6 +1957,29 @@ export component Sonic inherits Window {
                             Action { width: 105px; label: "Reset cache"; clicked => { root.reset-art(); } }
                             if root.cache-status != "": Label { text: root.cache-status; font-size: 13px; color: Palette.muted; }
                         }
+                    }
+                    if root.settings-tab == 3: SettingsCard {
+                        Label { text: "Listen along"; font-size: 16px; font-weight: 700; height: 23px; }
+                        Text { text: "Jam with anyone signed in to the same Plex account: one shared queue, play and pause, kept in sync. Start or join from the Queue page."; wrap: word-wrap; color: Palette.muted; font-size: 13px; }
+                        HorizontalLayout {
+                            spacing: 12px; alignment: start;
+                            Rectangle {
+                                width: 48px; height: 48px; border-radius: 24px; clip: true; background: Palette.glass;
+                                Image { width: parent.width; height: parent.height; source: root.jam-avatar; image-fit: cover; }
+                            }
+                            VerticalLayout { alignment: center; Action { width: 140px; label: "Choose picture…"; clicked => { root.jam-pick-avatar(); } } }
+                        }
+                        HorizontalLayout {
+                            spacing: 12px; alignment: start;
+                            Label { text: "Your name"; width: 110px; color: Palette.muted; font-size: 13px; }
+                            LineEdit { text <=> root.jam-name; min-width: 0px; max-width: 245px; horizontal-stretch: 1; placeholder-text: "e.g. Evan"; }
+                        }
+                        HorizontalLayout {
+                            spacing: 12px; alignment: start;
+                            Label { text: "Away from home"; width: 110px; color: Palette.muted; font-size: 13px; }
+                            LineEdit { text <=> root.jam-server; min-width: 0px; max-width: 245px; horizontal-stretch: 1; placeholder-text: "jam server, e.g. jam.example.com"; }
+                        }
+                        HorizontalLayout { alignment: start; Action { width: 90px; label: "Save"; clicked => { root.jam-save-settings(); } } }
                     }
                     if root.settings-tab == 3: SettingsCard {
                         Label { text: "Discord Rich Presence"; font-size: 16px; font-weight: 700; height: 23px; }

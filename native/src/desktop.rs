@@ -331,6 +331,41 @@ fn ico_image(file: &[u8], target: i32) -> Option<&[u8]> {
     file.get(offset..offset.checked_add(size)?)
 }
 
+/// Opens the Windows file picker for a picture (the jam profile picture).
+pub fn pick_image(ui: &crate::Sonic) -> Option<std::path::PathBuf> {
+    use windows_sys::Win32::UI::Controls::Dialogs::{
+        GetOpenFileNameW, OFN_FILEMUSTEXIST, OFN_NOCHANGEDIR, OFN_PATHMUSTEXIST, OPENFILENAMEW,
+    };
+    let owner = ui
+        .window()
+        .window_handle()
+        .window_handle()
+        .ok()
+        .and_then(|handle| match handle.as_raw() {
+            RawWindowHandle::Win32(handle) => Some(handle.hwnd.get() as HWND),
+            _ => None,
+        })
+        .unwrap_or(null_mut());
+    let mut file = [0u16; 1024];
+    let filter: Vec<u16> = "Pictures\0*.png;*.jpg;*.jpeg;*.webp;*.bmp\0\0".encode_utf16().collect();
+    let title: Vec<u16> = "Choose your jam picture\0".encode_utf16().collect();
+    let mut dialog = OPENFILENAMEW {
+        lStructSize: size_of::<OPENFILENAMEW>() as u32,
+        hwndOwner: owner,
+        lpstrFilter: filter.as_ptr(),
+        lpstrFile: file.as_mut_ptr(),
+        nMaxFile: file.len() as u32,
+        lpstrTitle: title.as_ptr(),
+        Flags: OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR,
+        ..Default::default()
+    };
+    if unsafe { GetOpenFileNameW(&mut dialog) } == 0 {
+        return None;
+    }
+    let len = file.iter().position(|&c| c == 0).unwrap_or(0);
+    Some(std::path::PathBuf::from(String::from_utf16_lossy(&file[..len])))
+}
+
 /// Opens the Windows folder picker over Sonic.
 pub fn pick_folder(ui: &crate::Sonic) -> Option<std::path::PathBuf> {
     use windows_sys::Win32::{

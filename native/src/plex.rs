@@ -476,6 +476,12 @@ impl Plex {
         Self::discover(http, account, None)
     }
 
+    /// The Plex account's sign-in token (the jam relay checks it with plex.tv to
+    /// keep jams to one account).
+    pub fn account_token(&self) -> String {
+        self.account.token.clone()
+    }
+
     /// The server address in use, and whether it is on the home network.
     pub fn server(&self) -> Url {
         self.endpoint.read().map(|e| e.url.clone()).unwrap_or_else(|e| e.into_inner().url.clone())
