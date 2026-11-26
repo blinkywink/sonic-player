@@ -707,6 +707,9 @@ export component Sonic inherits Window {
     // A downloaded update waiting for a restart ("" = none).
     in property <string> update-ready;
     callback restart-to-update;
+    // Settings' "Check for updates" and what it found.
+    in property <string> update-status;
+    callback check-for-updates;
     callback toggle-plex-library(int);
     // Playlist pending deletion confirmation (-1 = none).
     property <int> delete-playlist-index: -1;
@@ -1599,6 +1602,11 @@ export component Sonic inherits Window {
                             clicked => { root.settings-tab = index; }
                         }
                         Label { text: "Sonic " + root.app-version; font-size: 12px; color: Palette.muted; width: 90px; horizontal-alignment: right; }
+                        Action { width: 138px; height: 30px; font-size: 12px; label: "Check for updates"; clicked => { root.check-for-updates(); } }
+                    }
+                    if root.update-status != "": HorizontalLayout {
+                        alignment: end;
+                        Label { text: root.update-status; font-size: 12px; color: Palette.muted; height: 16px; horizontal-alignment: right; }
                     }
                     if root.settings-tab == 0: SettingsCard {
                         Label { text: "Output"; font-weight: 700; font-size: 16px; height: 23px; }

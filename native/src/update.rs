@@ -19,6 +19,48 @@ use std::{
 /// The version that has been installed and runs on the next start.
 static READY: Mutex<Option<String>> = Mutex::new(None);
 static RESTART: AtomicBool = AtomicBool::new(false);
+/// A check is running (so the button can't start two at once), and what the last
+/// one found, for Settings.
+static CHECKING: AtomicBool = AtomicBool::new(false);
+static STATUS: Mutex<String> = Mutex::new(String::new());
+
+fn set_status(text: &str) {
+    if let Ok(mut status) = STATUS.lock() {
+        *status = text.to_owned();
+    }
+}
+
+/// What the last update check found ("" before any).
+pub fn status() -> String {
+    STATUS.lock().map(|status| status.clone()).unwrap_or_default()
+}
+
+/// Checks for a new version right now (the Settings button).
+pub fn check_now() {
+    if ready().is_some() {
+        return set_status("A new version is ready: restart to use it.");
+    }
+    let Ok(exe) = std::env::current_exe() else { return };
+    if !cfg!(windows) || exe.components().any(|part| part.as_os_str() == "target") {
+        return set_status("Updates only apply to the installed Windows app.");
+    }
+    if CHECKING.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    set_status("Checking for updates…");
+    thread::spawn(move || {
+        report(check_and_install(&exe));
+        CHECKING.store(false, Ordering::Release);
+    });
+}
+
+fn report(result: &Result<bool>) {
+    match result {
+        Ok(true) => set_status("Downloaded the new version: restart to use it."),
+        Ok(false) => set_status(&format!("You're on the latest version ({}).", env!("CARGO_PKG_VERSION"))),
+        Err(error) => set_status(&format!("Couldn't check for updates: {error}")),
+    }
+}
 
 /// The downloaded version waiting for a restart, if any.
 pub fn ready() -> Option<String> {
@@ -80,10 +122,17 @@ pub fn start() {
     thread::spawn(move || {
         thread::sleep(Duration::from_secs(5));
         loop {
-            match check_and_install(&exe) {
-                Ok(true) => return, // Installed; offered as "Restart to update".
-                Ok(false) => {}
-                Err(error) => eprintln!("Sonic update check failed: {error:#}"),
+            // Skip a round while the Settings button is already checking.
+            if !CHECKING.swap(true, Ordering::AcqRel) {
+                let result = check_and_install(&exe);
+                CHECKING.store(false, Ordering::Release);
+                if let Err(error) = &result {
+                    eprintln!("Sonic update check failed: {error:#}");
+                }
+                if matches!(result, Ok(true)) {
+                    report(&result);
+                    return; // Installed; offered as "Restart to update".
+                }
             }
             thread::sleep(CHECK_EVERY);
         }

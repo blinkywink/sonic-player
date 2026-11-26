@@ -4603,14 +4603,20 @@ fn main() -> Result<()> {
     let update_timer = Timer::default();
     {
         let weak = ui.as_weak();
-        update_timer.start(TimerMode::Repeated, Duration::from_secs(5), move || {
-            if let (Some(ui), Some(version)) = (weak.upgrade(), update::ready())
+        update_timer.start(TimerMode::Repeated, Duration::from_secs(1), move || {
+            let Some(ui) = weak.upgrade() else { return };
+            if let Some(version) = update::ready()
                 && ui.get_update_ready().as_str() != version
             {
                 ui.set_update_ready(version.into());
             }
+            let status = update::status();
+            if ui.get_update_status().as_str() != status {
+                ui.set_update_status(status.into());
+            }
         });
     }
+    ui.on_check_for_updates(update::check_now);
     ui.on_restart_to_update(|| {
         update::request_restart();
         let _ = slint::quit_event_loop();
