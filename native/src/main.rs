@@ -107,6 +107,12 @@ struct State {
     audio_devices: Vec<String>,
     /// Pause as soon as the song restarts (moving to a new output while paused).
     pause_after_start: bool,
+    /// Track cache needs saving; when it was last saved.
+    tracks_dirty: bool,
+    last_tracks_save: Instant,
+    /// When the window was hidden, and the hide whose memory was already freed.
+    hidden_since: Option<Instant>,
+    memory_trimmed_at: Option<Instant>,
     /// What volume leveling applies to the playing song (shown in Settings).
     leveling_note: String,
     /// The album whose cover the player is showing (to keep it within an album).
@@ -592,7 +598,11 @@ impl State {
             return None;
         }
         let image = mosaic(&covers)?;
-        self.mosaics.borrow_mut().insert(keys, image.clone());
+        let mut mosaics = self.mosaics.borrow_mut();
+        if mosaics.len() >= 24 {
+            mosaics.clear();
+        }
+        mosaics.insert(keys, image.clone());
         Some(image)
     }
 
@@ -660,6 +670,7 @@ impl State {
             local_folders: self.data.preferences.local_folders.clone(),
             art_theme: self.art_theme,
             close_to_tray: ui.get_close_to_tray(),
+            gpu_rendering: ui.get_gpu_rendering(),
             font: ui.get_font_index(),
             discord_id: ui.get_discord_id().trim().to_owned(),
             discord_image: ui.get_discord_image().trim().to_owned(),
@@ -1751,7 +1762,7 @@ impl State {
                     if ui.get_selected_key().as_str() == key {
                         ui.set_selected_art(art.clone());
                     }
-                    let evicted = if self.artwork.len() >= 160 {
+                    let evicted = if self.artwork.len() >= 120 {
                         let evicted = self
                             .artwork
                             .keys()
@@ -1968,8 +1979,59 @@ impl State {
         });
     }
 
+    /// Marks the album tracks to be saved (done at most every 30 seconds).
+    fn save_tracks(&mut self) {
+        self.tracks_dirty = true;
+    }
+
+    /// While the window has been hidden for a minute (Sonic in the tray), drops
+    /// the cover images and hands unused memory back to Windows; they reload when
+    /// the window opens. Also writes the track cache when it changed.
+    fn idle_upkeep(&mut self, ui: &Sonic) {
+        if self.tracks_dirty && self.last_tracks_save.elapsed() > Duration::from_secs(30) {
+            self.tracks_dirty = false;
+            self.last_tracks_save = Instant::now();
+            self.write_tracks();
+        }
+        if window_on_screen(ui) {
+            self.hidden_since = None;
+            return;
+        }
+        let since = *self.hidden_since.get_or_insert_with(Instant::now);
+        if self.memory_trimmed_at == Some(since) || since.elapsed() < Duration::from_secs(60) {
+            return;
+        }
+        self.memory_trimmed_at = Some(since);
+        self.artwork.clear();
+        self.pending_art.clear();
+        self.mosaics.borrow_mut().clear();
+        for index in 0..self.album_model.row_count() {
+            if let Some(mut row) = self.album_model.row_data(index)
+                && row.art.size().width > 0
+            {
+                row.art = Image::default();
+                self.album_model.set_row_data(index, row);
+            }
+        }
+        ui.set_selected_art(Image::default());
+        #[cfg(windows)]
+        desktop::trim_memory();
+    }
+
+    /// Writes the track cache right away if it changed (on quit).
+    fn write_tracks_now(&self) {
+        if !self.tracks_dirty {
+            return;
+        }
+        let tracks: HashMap<&String, &Vec<Entry>> =
+            self.loaded_tracks.iter().filter(|(key, _)| !key.starts_with("local-album:")).collect();
+        if let (Some(path), Ok(bytes)) = (tracks_path(), serde_json::to_vec(&tracks)) {
+            let _ = cache::write_atomic(&path, &bytes);
+        }
+    }
+
     /// Saves the Plex album tracks for the next run (in the background).
-    fn save_tracks(&self) {
+    fn write_tracks(&self) {
         let tracks: HashMap<String, Vec<Entry>> = self
             .loaded_tracks
             .iter()
@@ -2821,6 +2883,10 @@ fn main() -> Result<()> {
         return Ok(());
     };
     update::start();
+    // The lighter CPU renderer when GPU drawing is turned off in Settings.
+    if library::load().is_ok_and(|data| !data.preferences.gpu_rendering) {
+        let _ = slint::BackendSelector::new().renderer_name("software".into()).select();
+    }
     let ui = Sonic::new()?;
     let (data, can_save) = match library::load() {
         Ok(data) => (data, true),
@@ -2836,6 +2902,7 @@ fn main() -> Result<()> {
     ui.set_normalizer_enabled(preferences.normalizer);
     ui.set_online_lyrics(preferences.online_lyrics);
     ui.set_close_to_tray(preferences.close_to_tray);
+    ui.set_gpu_rendering(preferences.gpu_rendering);
     ui.set_has_tray(cfg!(windows));
     #[cfg(windows)]
     desktop::set_close_to_tray(preferences.close_to_tray);
@@ -2885,6 +2952,10 @@ fn main() -> Result<()> {
         default_device: None,
         audio_devices: Vec::new(),
         pause_after_start: false,
+        tracks_dirty: false,
+        last_tracks_save: Instant::now(),
+        hidden_since: None,
+        memory_trimmed_at: None,
         leveling_note: String::new(),
         art_album: String::new(),
         reload_all_loudness: false,
@@ -4224,7 +4295,7 @@ fn main() -> Result<()> {
             #[cfg(windows)]
             desktop::set_close_to_tray(ui.get_close_to_tray());
             if let Ok(mut state) = state.try_borrow_mut() {
-                state.save(&ui, if ui.get_close_to_tray() { "Closing keeps Sonic in the tray." } else { "Closing quits Sonic." });
+                state.save(&ui, "Saved window settings.");
             }
         }
     });
@@ -4449,6 +4520,7 @@ fn main() -> Result<()> {
         }
         state.preload_next(&ui, &tx);
         state.watch_playback(&ui, &tx);
+        state.idle_upkeep(&ui);
         state.refresh_track_art(&ui, &tx);
         media.update(&ui, state.queue.get(state.current));
     });
@@ -4479,6 +4551,7 @@ fn main() -> Result<()> {
     });
     ui.run()?;
     exit_state.borrow_mut().flush_session(&ui, true)?;
+    exit_state.borrow().write_tracks_now();
     // Let go of the single-instance lock (owned by the main timer) first so the
     // new copy can start.
     drop(timer);

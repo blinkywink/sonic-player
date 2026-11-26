@@ -20,6 +20,13 @@ const TRAY_MESSAGE: u32 = WM_APP + 1;
 /// Whether closing the window hides Sonic to the tray (true) or quits it.
 static CLOSE_TO_TRAY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 
+/// Hands memory Sonic isn't using right now back to Windows (while hidden).
+pub fn trim_memory() {
+    unsafe {
+        SetProcessWorkingSetSize(GetCurrentProcess(), usize::MAX, usize::MAX);
+    }
+}
+
 pub fn set_close_to_tray(enabled: bool) {
     CLOSE_TO_TRAY.store(enabled, std::sync::atomic::Ordering::Relaxed);
 }
