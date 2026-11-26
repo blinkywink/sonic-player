@@ -79,7 +79,7 @@ impl Default for Preferences {
             eq_gains: [0.0; 20],
             eq_preamp: 0.0,
             eq_preset: 0,
-            normalizer: false,
+            normalizer: true,
             font: 0,
             discord_id: String::new(),
             discord_image: String::new(),

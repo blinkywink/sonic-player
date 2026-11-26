@@ -185,9 +185,9 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             libraries: Vec::new(),
-            columns: 2,
+            columns: 3,
             eq_preset: 0,
-            normalizer: false,
+            normalizer: true,
             online_lyrics: true,
             server_address: String::new(),
             jam_name: String::new(),
