@@ -15,7 +15,7 @@ use std::{
 };
 
 /// The shared playback: what everyone in the jam plays.
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Default, Deserialize, Serialize)]
 pub struct Playback {
     pub queue: Vec<Entry>,
     pub current: usize,
@@ -37,7 +37,7 @@ impl Playback {
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct Member {
     pub client: String,
     pub name: String,
@@ -46,7 +46,7 @@ pub struct Member {
     pub avatar: String,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct Snapshot {
     pub version: u64,
     pub server_now: u64,
