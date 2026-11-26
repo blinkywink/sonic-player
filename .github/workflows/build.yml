@@ -159,6 +159,8 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+      - name: Write the iPhone app source (for KravaSign and other signers)
+        run: python3 .github/ios-source.py "${GITHUB_REF_NAME#v}" dist/sonic-ios-unsigned.ipa dist/source.json
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
