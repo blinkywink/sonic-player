@@ -49,7 +49,7 @@ pub fn check_now() {
     }
     set_status("Checking for updates…");
     thread::spawn(move || {
-        report(check_and_install(&exe));
+        report(&check_and_install(&exe));
         CHECKING.store(false, Ordering::Release);
     });
 }
