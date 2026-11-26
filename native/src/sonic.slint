@@ -1972,12 +1972,12 @@ export component Sonic inherits Window {
                         HorizontalLayout {
                             spacing: 12px; alignment: start;
                             Label { text: "Your name"; width: 110px; color: Palette.muted; font-size: 13px; }
-                            LineEdit { text <=> root.jam-name; min-width: 0px; max-width: 245px; horizontal-stretch: 1; placeholder-text: "e.g. Evan"; }
+                            LineEdit { text <=> root.jam-name; width: 260px; height: 34px; placeholder-text: "e.g. Evan"; }
                         }
                         HorizontalLayout {
                             spacing: 12px; alignment: start;
                             Label { text: "Away from home"; width: 110px; color: Palette.muted; font-size: 13px; }
-                            LineEdit { text <=> root.jam-server; min-width: 0px; max-width: 245px; horizontal-stretch: 1; placeholder-text: "jam server, e.g. jam.example.com"; }
+                            LineEdit { text <=> root.jam-server; width: 260px; height: 34px; placeholder-text: "jam server, e.g. jam.example.com"; }
                         }
                         HorizontalLayout { alignment: start; Action { width: 90px; label: "Save"; clicked => { root.jam-save-settings(); } } }
                     }
