@@ -756,7 +756,8 @@ export component Sonic inherits Window {
     callback seek(float);
     callback volume(float);
 
-    callback request-visible-art(float, float, float, float, int);
+    // Visible rows, plus the tile size and corner radius in physical pixels.
+    callback request-visible-art(float, float, float, float, int, float, float);
 
     shortcuts := FocusScope {
     x: 0px; y: 0px; width: root.width; height: root.height;
@@ -1097,11 +1098,11 @@ export component Sonic inherits Window {
                         if !root.list-mode: VerticalLayout {
                             Rectangle {
                                 height: grid.cover-size;
-                                background: root.selected-key == album.key ? Palette.selected : Palette.surface;
+                                // The cover's corners are already rounded (see decode_cover), so
+                                // there's no clipping or blurred shadow to redraw while scrolling.
+                                background: album.art.width > 0 ? transparent : root.selected-key == album.key ? Palette.selected : Palette.surface;
                                 border-radius: 14px;
-                                drop-shadow-color: #00000038; drop-shadow-blur: 18px; drop-shadow-offset-y: 6px;
-                                clip: true;
-                                Artwork { width: parent.width; height: parent.height; source: album.art; }
+                                Artwork { width: parent.width; height: parent.height; source: album.art; image-fit: fill; }
                                 // Selection ring drawn inside the cover so the grid edges never clip it.
                                 if root.selected-key == album.key: Rectangle {
                                     border-radius: 14px; border-width: 3px; border-color: Palette.text.with-alpha(0.8);
@@ -1150,7 +1151,7 @@ export component Sonic inherits Window {
                 Timer {
                     interval: 180ms;
                     running: root.connected || root.local-enabled;
-                    triggered => { root.request-visible-art(-grid.content-y / 1px, grid.visible-height / 1px, grid.row-height / 1px, grid.year-height / 1px, grid.columns); }
+                    triggered => { root.request-visible-art(-grid.content-y / 1px, grid.visible-height / 1px, grid.row-height / 1px, grid.year-height / 1px, grid.columns, grid.cover-size / 1phx, 14px / 1phx); }
                 }
             }
             if root.page == 1: now-playing := Rectangle {

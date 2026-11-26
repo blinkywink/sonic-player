@@ -32,7 +32,7 @@ use std::{
     rc::Rc,
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU32, Ordering},
         mpsc::{self, Sender},
     },
     thread,
@@ -2310,11 +2310,22 @@ fn warm(plex: &Option<Plex>, track: &Entry) {
 /// and keeps the cover cache small; Now Playing loads its own larger copy.
 const THUMB_SIZE: u32 = 320;
 
+/// The album grid's tile size and corner radius in physical pixels. Grid covers
+/// are decoded to exactly this, corners already rounded, so drawing them while
+/// scrolling is a plain copy: no resizing or clipping on every frame.
+static TILE_PX: AtomicU32 = AtomicU32::new(240);
+static TILE_RADIUS_PX: AtomicU32 = AtomicU32::new(21);
+
 fn cover(plex: &Plex, thumb: &str) -> Option<Art> {
-    cover_at_size(plex, thumb, THUMB_SIZE)
+    let size = TILE_PX.load(Ordering::Relaxed).max(THUMB_SIZE);
+    decode_cover(&cover_bytes(plex, thumb, size)?)
 }
 
 fn cover_at_size(plex: &Plex, thumb: &str, size: u32) -> Option<Art> {
+    decode_cover_at_size(&cover_bytes(plex, thumb, size)?, size)
+}
+
+fn cover_bytes(plex: &Plex, thumb: &str, size: u32) -> Option<Vec<u8>> {
     let size_query = size.to_string();
     let response = plex
         .request("/photo/:/transcode")
@@ -2333,11 +2344,49 @@ fn cover_at_size(plex: &Plex, thumb: &str, size: u32) -> Option<Art> {
         .ok()?;
     let mut data = Vec::new();
     response.take(2 * 1024 * 1024).read_to_end(&mut data).ok()?;
-    decode_cover_at_size(&data, size)
+    Some(data)
 }
 
+/// A grid cover: exactly tile-sized and square, with rounded corners.
 fn decode_cover(data: &[u8]) -> Option<Art> {
-    decode_cover_at_size(data, THUMB_SIZE)
+    let size = TILE_PX.load(Ordering::Relaxed).clamp(48, 1024);
+    let radius = TILE_RADIUS_PX.load(Ordering::Relaxed) as f32;
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(data)).with_guessed_format().ok()?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(2048);
+    limits.max_image_height = Some(2048);
+    reader.limits(limits);
+    let mut pixels = reader
+        .decode()
+        .ok()?
+        .resize_to_fill(size, size, image::imageops::FilterType::Triangle)
+        .into_rgba8();
+    round_corners(&mut pixels, radius);
+    Some(SharedPixelBuffer::clone_from_slice(pixels.as_raw(), pixels.width(), pixels.height()))
+}
+
+/// Makes the corners transparent along a circle of `radius` (antialiased).
+fn round_corners(image: &mut image::RgbaImage, radius: f32) {
+    let (width, height) = image.dimensions();
+    let radius = radius.min(width.min(height) as f32 / 2.0);
+    if radius < 1.0 {
+        return;
+    }
+    let reach = radius.ceil() as u32;
+    for y in 0..reach.min(height) {
+        for x in 0..reach.min(width) {
+            // Distance from the corner circle's centre, for this pixel's centre.
+            let (dx, dy) = (radius - (x as f32 + 0.5), radius - (y as f32 + 0.5));
+            let coverage = (radius - (dx * dx + dy * dy).sqrt() + 0.5).clamp(0.0, 1.0);
+            if coverage >= 1.0 || dx < 0.0 || dy < 0.0 {
+                continue;
+            }
+            for (px, py) in [(x, y), (width - 1 - x, y), (x, height - 1 - y), (width - 1 - x, height - 1 - y)] {
+                let pixel = image.get_pixel_mut(px, py);
+                pixel.0[3] = (pixel.0[3] as f32 * coverage).round() as u8;
+            }
+        }
+    }
 }
 
 fn decode_cover_at_size(data: &[u8], size: u32) -> Option<Art> {
@@ -3174,8 +3223,25 @@ fn main() -> Result<()> {
     });
     ui.on_request_visible_art({
         let (state, tx) = (state.clone(), tx.clone());
-        move |top, height, row_height, year_height, columns| {
+        move |top, height, row_height, year_height, columns, tile_px, radius_px| {
             let mut state = state.borrow_mut();
+            let tile = tile_px.round().max(48.0) as u32;
+            TILE_RADIUS_PX.store(radius_px.round().max(0.0) as u32, Ordering::Relaxed);
+            let decoded_at = TILE_PX.load(Ordering::Relaxed);
+            if tile.abs_diff(decoded_at) * 100 > decoded_at * 12 {
+                // Tiles changed size a lot (window resized): redo the covers at the new size.
+                TILE_PX.store(tile, Ordering::Relaxed);
+                state.artwork.clear();
+                state.pending_art.clear();
+                for index in 0..state.album_model.row_count() {
+                    if let Some(mut row) = state.album_model.row_data(index)
+                        && row.art.size().width > 0
+                    {
+                        row.art = Image::default();
+                        state.album_model.set_row_data(index, row);
+                    }
+                }
+            }
             let plex = state.plex.clone();
             let columns = columns.max(1) as usize;
             if columns != state.album_columns {
@@ -4824,7 +4890,7 @@ mod drag_tests {
         };
         set_rows(&ui, 2);
         let weak = ui.as_weak();
-        ui.on_request_visible_art(move |_, _, _, _, columns| {
+        ui.on_request_visible_art(move |_, _, _, _, columns, _, _| {
             if let Some(ui) = weak.upgrade() {
                 set_rows(&ui, columns);
             }
