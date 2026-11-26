@@ -50,7 +50,8 @@ pub struct Preferences {
     pub art_theme: Option<[u8; 3]>,
     /// Closing the window keeps Sonic playing in the tray (Windows); off quits.
     pub close_to_tray: bool,
-    /// Draw with the GPU (smooth scrolling); off uses the lighter CPU renderer.
+    /// Draw with the GPU (smooth scrolling). Off by default: the CPU renderer uses
+    /// far less memory (about 40 MB instead of 300+ on integrated graphics).
     pub gpu_rendering: bool,
 }
 
@@ -85,7 +86,7 @@ impl Default for Preferences {
             local_folders: Vec::new(),
             art_theme: None,
             close_to_tray: true,
-            gpu_rendering: true,
+            gpu_rendering: false,
         }
     }
 }

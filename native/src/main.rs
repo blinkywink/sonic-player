@@ -2883,8 +2883,8 @@ fn main() -> Result<()> {
         return Ok(());
     };
     update::start();
-    // The lighter CPU renderer when GPU drawing is turned off in Settings.
-    if library::load().is_ok_and(|data| !data.preferences.gpu_rendering) {
+    // The lighter CPU renderer unless GPU drawing is turned on in Settings.
+    if !library::load().is_ok_and(|data| data.preferences.gpu_rendering) {
         let _ = slint::BackendSelector::new().renderer_name("software".into()).select();
     }
     let ui = Sonic::new()?;

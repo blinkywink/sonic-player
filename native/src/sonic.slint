@@ -591,7 +591,7 @@ export component Sonic inherits Window {
     in-out property <bool> close-to-tray: true;
     in property <bool> has-tray;
     // GPU drawing (smooth scrolling); off is lighter on memory. Applies after a restart.
-    in-out property <bool> gpu-rendering: true;
+    in-out property <bool> gpu-rendering: false;
     callback close-to-tray-toggled;
     changed close-to-tray => { root.close-to-tray-toggled(); }
     changed gpu-rendering => { root.close-to-tray-toggled(); }
@@ -1777,7 +1777,7 @@ export component Sonic inherits Window {
                             Label { text: "Smooth scrolling (draws with the graphics card)"; height: 22px; }
                         }
                         TouchArea { mouse-cursor: pointer; clicked => { root.gpu-rendering = !root.gpu-rendering; } } }
-                        HorizontalLayout { padding-left: 32px; Text { text: "Off uses noticeably less memory. Takes effect the next time Sonic starts."; wrap: word-wrap; color: Palette.muted; font-size: 12px; horizontal-stretch: 1; } }
+                        HorizontalLayout { padding-left: 32px; Text { text: "Uses a lot more memory (often 300 MB or more). Takes effect the next time Sonic starts."; wrap: word-wrap; color: Palette.muted; font-size: 12px; horizontal-stretch: 1; } }
                         if root.has-tray: Rectangle { height: 22px; HorizontalLayout {
                             spacing: 10px; alignment: start;
                             accessible-role: checkbox; accessible-label: "Keep playing in the tray when the window is closed";
